@@ -1371,6 +1371,15 @@
     if (!WA || WA.prototype.__noclick) return;
     WA.prototype.__noclick = true;
     WA.prototype.destroy = function () {
+      if (this._srcs) {
+        while (this._srcs.length) {
+          var s = this._srcs.shift();
+          try { if (s.stop) s.stop(); } catch (e0) {}
+          try { s.disconnect(); } catch (e1) {}
+        }
+      }
+      this.startTime = 0;
+      this.mediaOrigin = null;
       try { this.gain.disconnect(); } catch (e) {}
       this.context._connections = Math.max(0, (this.context._connections || 1) - 1);
     };
@@ -1433,7 +1442,7 @@
         var queued = this.audioOut ? this.audioOut.enqueuedTime : 0;
         var n = 0;
         var misses = 0;
-        while (queued < 1.2 && n < 14) {
+        while (queued < 0.35 && n < 16) {
           n++;
           if (this.audio.decode()) {
             misses = 0;
@@ -1450,26 +1459,26 @@
       if (!this.video) return;
       var speaker = this.audioOut && this.audioOut.speakerTime ? this.audioOut.speakerTime() : 0;
       var audioReady = this.audio && this.audio.canPlay && speaker > 0;
-      if (audioReady) {
-        var vClock = this.video.currentTime;
-        if (!isFinite(speaker) || !isFinite(vClock)) {
-          this.video.decode();
-          return;
-        }
-        if (vClock > speaker + 0.03) return;
-        var lag = speaker - vClock;
-        var max = 1;
-        if (lag > 0.06) max = 4;
-        if (lag > 0.18) max = 10;
-        var i = 0;
-        while (i < max) {
-          if (this.video.currentTime > speaker + 0.01) break;
-          if (!this.video.decode()) break;
-          i++;
-        }
+      if (!audioReady) {
+        if (!this.audio || !this.audio.canPlay) this.video.decode();
         return;
       }
-      this.video.decode();
+      var vClock = this.video.currentTime;
+      if (!isFinite(speaker) || !isFinite(vClock)) {
+        this.video.decode();
+        return;
+      }
+      if (vClock > speaker + 0.03) return;
+      var lag = speaker - vClock;
+      var max = 1;
+      if (lag > 0.06) max = 4;
+      if (lag > 0.18) max = 12;
+      var i = 0;
+      while (i < max) {
+        if (this.video.currentTime > speaker + 0.01) break;
+        if (!this.video.decode()) break;
+        i++;
+      }
     };
   }
 
@@ -1510,6 +1519,13 @@
       });
       hardenBits(player.audio);
       hardenBits(player.video);
+      if (player.audioOut) {
+        player.audioOut.startTime = 0;
+        player.audioOut.mediaOrigin = null;
+        player.audioOut._srcs = [];
+        player.audioOut.enabled = true;
+        player.audioOut.unlocked = true;
+      }
       applyPlayerVol();
       fitStage();
     } catch (e) {
@@ -1543,7 +1559,7 @@
   function togglePause() {
     if (!playing) return;
     if (!paused) {
-      startAt = currentPos();
+      startAt = Math.max(0, Math.round(currentPos() * 10) / 10);
       paused = true;
       if (player) { try { player.destroy(); } catch (e) {} player = null; }
       if (na) { try { na.pause(); } catch (e) {} }
