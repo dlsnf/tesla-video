@@ -38,7 +38,14 @@ function ffmpegInputPrefix(start, isLive) {
   return args;
 }
 
-function netInput(url, start, isLive) {
+function seekParts(start, isLive) {
+  const s = parseStart(start);
+  if (isLive || s <= 0) return { coarse: 0, fine: 0 };
+  if (s > 4) return { coarse: Math.max(0, s - 2), fine: 2 };
+  return { coarse: 0, fine: s };
+}
+
+function netInput(url, coarse, isLive) {
   const a = [
     '-reconnect', '1',
     '-reconnect_streamed', '1',
@@ -47,7 +54,7 @@ function netInput(url, start, isLive) {
     '-user_agent', YT_UA,
     '-referer', 'https://www.youtube.com/',
   ];
-  if (!isLive && start > 0) a.push('-ss', String(start));
+  if (!isLive && coarse > 0) a.push('-ss', String(coarse));
   a.push('-readrate', isLive ? '1.0' : '1.25');
   a.push('-i', url);
   return a;
@@ -62,15 +69,16 @@ function encodeTs(info) {
     '-q:v', '5',
     '-b:v', info.bitrate || '1000k',
     '-bf', '0',
-    '-vf', 'fps=30,scale=' + (info.scale || '640:360') + ',setsar=1',
+    '-vf', 'fps=30,scale=' + (info.scale || '640:360') + ':flags=fast_bilinear,setsar=1,setpts=PTS-STARTPTS',
+    '-af', 'aresample=44100:async=1:first_pts=0,asetpts=PTS-STARTPTS',
     '-c:a', 'mp2',
     '-b:a', '192k',
     '-ar', '44100',
     '-ac', '2',
     '-f', 'mpegts',
     '-flush_packets', '0',
-    '-muxdelay', '0.05',
-    '-muxpreload', '0.05',
+    '-muxdelay', '0',
+    '-muxpreload', '0',
     'pipe:1',
   ];
 }
@@ -107,13 +115,16 @@ function startTestAudio() {
 
 function startVideo(info, start) {
   if (info.type === 'test') return startTestVideo(info);
+  const sk = seekParts(start, info.isLive);
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
   if (info.audioUrl && info.audioUrl !== info.videoUrl) {
-    Array.prototype.push.apply(args, netInput(info.videoUrl, start, info.isLive));
-    Array.prototype.push.apply(args, netInput(info.audioUrl, start, info.isLive));
+    Array.prototype.push.apply(args, netInput(info.videoUrl, sk.coarse, info.isLive));
+    Array.prototype.push.apply(args, netInput(info.audioUrl, sk.coarse, info.isLive));
+    if (sk.fine > 0) args.push('-ss', String(sk.fine));
     args.push('-map', '0:v:0', '-map', '1:a:0');
   } else {
-    Array.prototype.push.apply(args, netInput(info.videoUrl, start, info.isLive));
+    Array.prototype.push.apply(args, netInput(info.videoUrl, sk.coarse, info.isLive));
+    if (sk.fine > 0) args.push('-ss', String(sk.fine));
     args.push('-map', '0:v:0', '-map', '0:a:0?');
   }
   Array.prototype.push.apply(args, encodeTs(info));
