@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Tesla Video Drive</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/app.css?v=27">
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24"><polygon points="8,5 19,12 8,19"/></svg></div>
+      <div>
+        <h1>Tesla Video Drive</h1>
+        <div class="sub">테슬라 브라우저 전용</div>
+      </div>
+    </div>
+    <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
+  </div>
+
+  <div class="grid">
+    <a class="card" href="player/">
+      <div class="icon yt">▶</div>
+      <div>
+        <div class="title">유튜브</div>
+        <div class="desc">홈 피드 · 검색 · PIN별 구독·즐겨찾기. 재생은 canvas 우회라 주행 모드에서도 화면이 나갑니다.</div>
+      </div>
+      <span class="arrow">›</span>
+    </a>
+    <a class="card" href="twitch/">
+      <div class="icon tw">◉</div>
+      <div>
+        <div class="title">트위치</div>
+        <div class="desc">라이브 채널을 30fps MPEG1으로 시청합니다. 채널 목록은 차에 저장됩니다.</div>
+      </div>
+      <span class="arrow">›</span>
+    </a>
+    <a class="card" href="test/">
+      <div class="icon help">🧪</div>
+      <div>
+        <div class="title">주행 모드 테스트</div>
+        <div class="desc">PC에서도 Tesla처럼 &lt;video&gt;를 강제 pause 해서, canvas 우회가 살아 있는지 확인합니다.</div>
+      </div>
+      <span class="arrow">›</span>
+    </a>
+    <a class="card" href="probe/">
+      <div class="icon pr">▣</div>
+      <div>
+        <div class="title">브라우저 진단</div>
+        <div class="desc">이 차의 Chromium이 WebGL / WebSocket / 코덱을 지원하는지 확인합니다.</div>
+      </div>
+      <span class="arrow">›</span>
+    </a>
+    <a class="card" href="#howto">
+      <div class="icon help">?</div>
+      <div>
+        <div class="title">차에서 여는 방법</div>
+        <div class="desc">테슬라 브라우저에서 이 주소를 연 뒤 북마크하세요.</div>
+      </div>
+      <span class="arrow">›</span>
+    </a>
+  </div>
+
+  <div class="notice" id="howto">
+    <b>사용 순서</b><br>
+    1. 차량 브라우저에서 이 페이지를 엽니다.<br>
+    2. PIN을 입력합니다 (서버에 설정한 숫자).<br>
+    3. 유튜브에서 검색하거나, 유튜브/영상 URL을 붙여 넣습니다.<br>
+    4. 화질은 기본 480p입니다. 핫스팟이면 360p를 권장합니다.<br><br>
+    <b>주의</b> — 운전 중 영상 시청은 위험하고 법령에 위배될 수 있습니다.
+    주차·충전·동승자 용도로만 사용하세요. 이 프로그램은 Tesla Drive Mode의
+    &lt;video&gt; 일시정지 제한을 canvas + WebSocket으로 우회하는 기술 연구 구현입니다.
+  </div>
+</div>
+
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="sub">허용된 PIN만 접속할 수 있습니다. PIN마다 구독·즐겨찾기가 따로 저장됩니다.</div>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+<script src="config.js?v=24"></script>
+<script src="js/common.js?v=24"></script>
+<script>
+tv.ensurePin(function(){});
+var lo = document.getElementById('btnLogout');
+if (lo) lo.onclick = function () { tv.logout(function () {}); };
+</script>
+</body>
+</html>

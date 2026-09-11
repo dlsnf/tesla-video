@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>재생 — Tesla Video Drive</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/app.css?v=63">
+</head>
+<body>
+<div class="wrap" id="page">
+  <div class="yt-top">
+    <div class="yt-top-right">
+      <button class="back" id="btnWatchBack" type="button">← 뒤로</button>
+      <button class="back" id="btnWatchReload" type="button">새로고침</button>
+      <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
+      <button class="star-btn watch-star" id="btnFavWatch" type="button" aria-label="즐겨찾기" data-star="">
+        <svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg>
+      </button>
+    </div>
+    <div class="yt-top-left">
+      <button class="brand yt-home" id="btnYtHome" type="button">
+        <span class="yt-logo" aria-hidden="true"><svg viewBox="0 0 28 20"><rect width="28" height="20" rx="6" fill="#FF0000"/><polygon points="11,5 20,10 11,15" fill="#fff"/></svg></span>
+        <span class="yt-word">YouTube</span>
+      </button>
+    </div>
+    <div class="yt-top-search watch-search">
+      <input class="inp" id="qWatch" placeholder="검색">
+      <button class="btn" id="btnWatchSearch" type="button">검색</button>
+    </div>
+  </div>
+
+  <div id="playerBox" class="player-box">
+    <div class="stage-wrap">
+      <canvas id="stage"></canvas>
+      <div class="tap-layer" id="tapLayer"></div>
+      <div class="tap-icon" id="tapIcon">▶</div>
+      <div class="hud-top">
+        <div class="hud-title" id="npTitle">불러오는 중...</div>
+        <div class="hud-fps" id="npFps">0 FPS</div>
+      </div>
+    </div>
+    <div class="bar-bottom">
+      <div class="seek-wrap" id="seekWrap">
+        <div class="seek-track">
+          <div class="seek-buf" id="seekBuf"></div>
+          <div class="seek-play" id="seekPlay"></div>
+        </div>
+        <div class="seek-knob" id="seekKnob"></div>
+        <input id="seek" class="seek-hit" type="range" min="0" max="1000" value="0">
+      </div>
+      <div class="bar-row">
+        <button class="ctrl play" id="btnPause" type="button">일시정지</button>
+        <button class="ctrl" id="btnBack" type="button">-10</button>
+        <button class="ctrl" id="btnFwd" type="button">+10</button>
+        <span class="time" id="npTime">0:00</span>
+        <span class="grow"></span>
+        <span class="vol-wrap">
+          <button class="vol-ico" id="btnMute" type="button">♪</button>
+          <input id="vol" class="vol" type="range" min="0" max="100" value="100">
+        </span>
+        <button class="ctrl qbtn on" data-q="360" type="button">360</button>
+        <button class="ctrl qbtn" data-q="480" type="button">480</button>
+        <button class="ctrl qbtn" data-q="720" type="button">720</button>
+        <button class="ctrl" id="btnSyncToggle" type="button">싱크</button>
+        <button class="ctrl fs" id="btnFs" type="button">전체화면</button>
+      </div>
+      <div id="syncPanel" class="sync-panel" style="display:none">
+        <div class="sync-label" id="syncLabel">영상과 소리를 한 줄로 맞춤</div>
+        <div class="sync-row">
+          <button class="ctrl" data-sync="-1" type="button">-1초</button>
+          <button class="ctrl" data-sync="-0.5" type="button">-0.5</button>
+          <button class="ctrl" data-sync="-0.1" type="button">-0.1</button>
+          <input id="syncRange" type="range" min="-80" max="80" value="0">
+          <button class="ctrl" data-sync="0.1" type="button">+0.1</button>
+          <button class="ctrl" data-sync="0.5" type="button">+0.5</button>
+          <button class="ctrl" data-sync="1" type="button">+1초</button>
+          <button class="ctrl play" id="btnAutoSync" type="button">지금 싱크</button>
+          <button class="ctrl" id="btnSyncReset" type="button">0으로</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <audio id="na" autoplay playsinline></audio>
+
+  <h1 class="watch-title" id="watchH">재생</h1>
+  <table class="ch-row" id="chRow" style="display:none">
+    <tr>
+      <td class="ch-av-td"><div class="ch-av" id="chAv"></div></td>
+      <td class="ch-name-td"><span class="ch-name" id="chName"></span></td>
+      <td class="ch-sub-td"><button class="sub-btn" id="btnSub" type="button">구독</button></td>
+    </tr>
+  </table>
+
+  <div class="stat" id="st">영상을 불러오는 중...</div>
+  <div class="chips" id="chips">
+    <button class="chip on" data-feed="related" type="button">관련 동영상</button>
+    <button class="chip" data-feed="search" type="button">검색</button>
+    <button class="chip" data-feed="subs" type="button">구독</button>
+    <button class="chip" data-feed="favs" type="button">즐겨찾기</button>
+  </div>
+  <div id="watchTabSearch" class="watch-tab-search" style="display:none">
+    <input class="inp" id="qWatchTab" placeholder="검색">
+    <button class="btn" id="btnWatchTabSearch" type="button">검색</button>
+  </div>
+  <h2 class="rel-h" id="relH" style="display:none">관련 동영상</h2>
+  <div id="libTools" class="lib-tools" style="display:none">
+    <input class="inp" id="libFilter" placeholder="채널명으로 검색">
+    <input class="inp" id="libVidFilter" placeholder="제목으로 필터" style="display:none">
+    <div class="lib-sorts" id="libSorts">
+      <button class="chip on" data-sort="new" type="button">최신</button>
+      <button class="chip" data-sort="old" type="button">오래된</button>
+      <button class="chip" data-sort="title" type="button">제목</button>
+      <button class="chip" data-sort="channel" type="button">채널</button>
+      <button class="chip" data-sort="views" type="button">조회수</button>
+      <button class="chip" data-sort="dur" type="button">길이</button>
+    </div>
+  </div>
+  <table class="feed-split watch-feed">
+    <tr>
+      <td class="subs-td" id="subsTd" style="display:none">
+        <div class="subs-rail" id="subsRail"></div>
+      </td>
+      <td class="feed-td">
+        <div class="yt-grid watch-list" id="list"></div>
+        <button class="more-bar" id="moreBar" type="button" style="display:none">더 보기</button>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="sub">허용된 PIN만 접속할 수 있습니다. PIN마다 구독·즐겨찾기가 따로 저장됩니다.</div>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+
+<script src="../config.js?v=63"></script>
+<script src="../js/common.js?v=63"></script>
+<script src="../js/jsmpeg.min.js?v=63"></script>
+<script src="../js/player.js?v=63"></script>
+</body>
+</html>

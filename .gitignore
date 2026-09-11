@@ -1,0 +1,20 @@
+# secrets and local config
+.env
+youtube-cookies.txt
+data/youtube-cookies.txt
+data/youtube-oauth.json
+
+# user data (PIN별 구독·즐겨찾기·시청 기록)
+data/favorites/
+data/subscriptions/
+data/history/
+data/probe-reports/
+data/**/*.json
+
+# deps and junk
+node_modules/
+*.log
+.DS_Store
+
+# local ops notes with PINs / server paths
+memo.txt
