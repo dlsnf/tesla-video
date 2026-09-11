@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>트위치 — Tesla Video Drive</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/app.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo" style="background:#9146ff"><svg viewBox="0 0 24 24"><polygon points="8,5 19,12 8,19"/></svg></div>
+      <div>
+        <h1>트위치</h1>
+        <div class="sub">라이브 MPEG1 30fps</div>
+      </div>
+    </div>
+    <button class="back" id="btnHome">홈</button>
+  </div>
+
+  <div id="playerBox" class="player-box">
+    <div class="hud">
+      <span><b id="npCh">—</b> <span id="npFps" style="color:#32d74b">0 FPS</span></span>
+      <span id="npTitle"></span>
+    </div>
+    <canvas id="nc" class="stage" style="width:100%;display:block;background:#000;aspect-ratio:16/9"></canvas>
+    <div class="controls">
+      <span class="sub">소리</span>
+      <input type="range" id="vol" min="0" max="100" value="100" style="flex:1;min-width:80px">
+      <button class="btn btn-gray btn-sm" id="btnSync">싱크 +2초</button>
+      <button class="btn btn-red btn-sm" id="npStop">정지</button>
+    </div>
+  </div>
+  <audio id="na"></audio>
+
+  <div class="block">
+    <div class="row">
+      <a class="btn btn-blue" id="loginLink" style="flex:1;display:flex;align-items:center;justify-content:center;">Twitch 로그인</a>
+    </div>
+  </div>
+  <div class="row">
+    <input class="inp" id="inp" placeholder="채널 이름  (예: xqc)">
+    <button class="btn btn-red" id="add">추가</button>
+    <button class="btn btn-gray" id="ref">새로고침</button>
+  </div>
+  <div id="list"><div class="notice">채널을 추가하세요</div></div>
+  <div class="stat" id="st">채널 목록은 이 차량 브라우저에 저장됩니다.</div>
+</div>
+
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+
+<script src="../config.js?v=4"></script>
+<script src="../js/common.js?v=4"></script>
+<script src="../js/jsmpeg.min.js?v=4"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var nc = $('nc'), na = $('na');
+  var player = null, curCh = null, fpsCount = 0, lastFps = 0;
+  var chans = [];
+  try { chans = JSON.parse(localStorage.getItem('tc') || '[]'); } catch (e) { chans = []; }
+
+  $('loginLink').href = tv.url('/api/twitch/login');
+  $('btnHome').onclick = function () { tv.home(); };
+
+  function save() { localStorage.setItem('tc', JSON.stringify(chans)); }
+
+  function addCh(nm) {
+    nm = nm.trim().toLowerCase().replace(/[^a-zA-Z0-9_]/g, '');
+    if (!nm || chans.indexOf(nm) !== -1) return;
+    chans.push(nm); save(); render();
+  }
+  function rmCh(nm) {
+    chans = chans.filter(function (c) { return c !== nm; });
+    save();
+    if (curCh === nm) stop();
+    render();
+  }
+
+  function checkStatus(nm, el) {
+    var dot = el.querySelector('.dot'), tl = el.querySelector('.tl');
+    tv.get('/api/twitch/status?channel=' + encodeURIComponent(nm), function (code, d) {
+      if (d && d.live) { dot.className = 'dot on'; tl.textContent = d.title || 'Live'; }
+      else { dot.className = 'dot'; tl.textContent = '오프라인'; }
+    });
+  }
+
+  function render() {
+    var box = $('list');
+    if (!chans.length) {
+      box.innerHTML = '<div class="notice">채널을 추가하세요</div>';
+      return;
+    }
+    var h = '';
+    for (var i = 0; i < chans.length; i++) {
+      h += '<div class="channel" data-ch="' + chans[i] + '"><span class="dot"></span>';
+      h += '<span class="nm">' + chans[i] + '</span><span class="tl">...</span>';
+      h += '<span class="del" data-d="' + chans[i] + '">X</span></div>';
+    }
+    box.innerHTML = h;
+    var nodes = box.querySelectorAll('.channel');
+    for (var j = 0; j < nodes.length; j++) {
+      nodes[j].onclick = function (e) {
+        if (e.target.className === 'del') return;
+        stream(this.getAttribute('data-ch'));
+      };
+      checkStatus(nodes[j].getAttribute('data-ch'), nodes[j]);
+    }
+    var dels = box.querySelectorAll('.del');
+    for (var k = 0; k < dels.length; k++) {
+      dels[k].onclick = function (e) { e.stopPropagation(); rmCh(this.getAttribute('data-d')); };
+    }
+  }
+
+  function stream(ch) {
+    stop();
+    curCh = ch;
+    $('playerBox').className = 'player-box on';
+    $('npCh').textContent = ch;
+    nc.width = 854; nc.height = 480;
+    na.preload = 'none';
+    na.src = tv.url('/api/audio?channel=' + encodeURIComponent(ch) + '&quality=720&_=' + Date.now());
+    na.load();
+    (function tp() { na.play().catch(function () { setTimeout(tp, 100); }); })();
+    var wsUrl = tv.ws('/ws/mpeg1?channel=' + encodeURIComponent(ch) + '&quality=720');
+    $('npTitle').textContent = '버퍼링...';
+    var syncTimer = setInterval(function () {
+      if (na.readyState >= 2 && na.currentTime > 0 && !player) {
+        clearInterval(syncTimer);
+        startPlayer(wsUrl);
+      }
+    }, 200);
+    setTimeout(function () { if (!player) { clearInterval(syncTimer); startPlayer(wsUrl); } }, 10000);
+  }
+
+  function startPlayer(wsUrl) {
+    fpsCount = 0; lastFps = 0;
+    player = new JSMpeg.Player(wsUrl, {
+      canvas: nc, audio: false, streaming: true, maxBufferSize: 1024 * 1024,
+      pauseWhenHidden: false, preserveDrawingBuffer: true,
+      onVideoDecode: function () {
+        fpsCount++;
+        var now = Date.now();
+        if (now - lastFps >= 1000) {
+          $('npFps').textContent = fpsCount + ' FPS';
+          fpsCount = 0; lastFps = now;
+          $('npTitle').textContent = 'LIVE';
+        }
+      }
+    });
+  }
+
+  function stop() {
+    if (player) { try { player.destroy(); } catch (e) {} player = null; }
+    na.pause(); na.src = ''; curCh = null;
+    $('playerBox').className = 'player-box';
+    render();
+  }
+
+  $('npStop').onclick = stop;
+  $('btnSync').onclick = function () { try { na.currentTime = Math.min(na.currentTime + 2, na.duration || 999); } catch (e) {} };
+  $('vol').oninput = function () { na.volume = this.value / 100; };
+  $('add').onclick = function () { addCh($('inp').value); $('inp').value = ''; };
+  $('inp').onkeydown = function (e) { if (e.key === 'Enter') $('add').click(); };
+  $('ref').onclick = render;
+
+  var urlToken = null;
+  var qs = window.location.search.substring(1).split('&');
+  for (var i = 0; i < qs.length; i++) {
+    var kv = qs[i].split('=');
+    if (kv[0] === 'token') urlToken = decodeURIComponent(kv[1] || '');
+  }
+
+  tv.ensurePin(function () {
+    if (urlToken) {
+      localStorage.setItem('twitch_token', urlToken);
+      $('st').textContent = '로그인 성공. 팔로우 가져오는 중...';
+      tv.get('/api/twitch/follows?token=' + encodeURIComponent(urlToken), function (code, d) {
+        if (d && d.ok && d.channels) {
+          var n = 0;
+          for (var i = 0; i < d.channels.length; i++) {
+            if (chans.indexOf(d.channels[i]) === -1) { chans.push(d.channels[i]); n++; }
+          }
+          save();
+          $('st').textContent = n ? (n + '개 채널을 가져왔습니다') : '이미 목록에 있습니다';
+          render();
+          try { history.replaceState({}, '', tv.url('/twitch/')); } catch (e) {}
+        } else $('st').textContent = '오류: ' + ((d && d.error) || '?');
+      });
+    } else render();
+  });
+})();
+</script>
+</body>
+</html>

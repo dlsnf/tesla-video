@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>YouTube — Tesla Video Drive</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/app.css?v=63">
+</head>
+<body>
+<div class="wrap" id="page">
+  <div class="yt-top">
+    <div class="yt-top-right">
+      <button class="back" id="btnAppHome" type="button">앱 홈</button>
+      <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
+    </div>
+    <div class="yt-top-left">
+      <button class="brand yt-home" id="btnYtHome" type="button">
+        <span class="yt-logo" aria-hidden="true"><svg viewBox="0 0 28 20"><rect width="28" height="20" rx="6" fill="#FF0000"/><polygon points="11,5 20,10 11,15" fill="#fff"/></svg></span>
+        <span class="yt-word">YouTube</span>
+      </button>
+    </div>
+    <div class="yt-top-search">
+      <input class="inp" id="q" placeholder="검색">
+      <button class="btn" id="btnGo" type="button">검색</button>
+    </div>
+  </div>
+
+  <div class="chips" id="chips">
+    <button class="chip on" data-feed="home">홈</button>
+    <button class="chip" data-feed="music">음악</button>
+    <button class="chip" data-feed="game">게임</button>
+    <button class="chip" data-feed="news">뉴스</button>
+    <button class="chip" data-feed="subs">구독</button>
+    <button class="chip" data-feed="favs">즐겨찾기</button>
+  </div>
+
+  <div id="libTools" class="lib-tools" style="display:none">
+    <input class="inp" id="libFilter" placeholder="채널명으로 검색">
+    <input class="inp" id="libVidFilter" placeholder="제목으로 필터" style="display:none">
+    <div class="lib-sorts" id="libSorts">
+      <button class="chip on" data-sort="new" type="button">최신</button>
+      <button class="chip" data-sort="old" type="button">오래된</button>
+      <button class="chip" data-sort="title" type="button">제목</button>
+      <button class="chip" data-sort="channel" type="button">채널</button>
+      <button class="chip" data-sort="views" type="button">조회수</button>
+      <button class="chip" data-sort="dur" type="button">길이</button>
+    </div>
+  </div>
+
+  <div class="stat" id="st">홈 피드를 불러오는 중...</div>
+  <table class="feed-split">
+    <tr>
+      <td class="subs-td" id="subsTd" style="display:none">
+        <div class="subs-rail" id="subsRail"></div>
+      </td>
+      <td class="feed-td">
+        <div class="yt-grid" id="list"></div>
+        <button class="more-bar" id="moreBar" type="button" style="display:none">더 보기</button>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="sub">허용된 PIN만 접속할 수 있습니다. PIN마다 구독·즐겨찾기가 따로 저장됩니다.</div>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+
+<script src="../config.js?v=63"></script>
+<script src="../js/common.js?v=63"></script>
+<script src="../js/player.js?v=63"></script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>주행 모드 테스트 — Tesla Video Drive</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/app.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24"><polygon points="8,5 19,12 8,19"/></svg></div>
+      <div>
+        <h1>주행 모드 테스트</h1>
+        <div class="sub">Tesla Drive Mode의 &lt;video&gt; pause() 를 PC에서 재현합니다</div>
+      </div>
+    </div>
+    <button class="back" id="btnHome">홈</button>
+  </div>
+
+  <div class="notice">
+    테슬라는 주행 중 HTML <b>&lt;video&gt;</b> 에 <b>pause()</b> 를 겁니다. 마지막 프레임이 멈추고,
+    <b>drawImage(video, canvas)</b> 는 검은 화면이 됩니다. 이 페이지는 그 동작을 흉내 낸 뒤,
+    이 서버의 MPEG1 + canvas 우회가 계속 움직이는지 나란히 보여 줍니다.
+    유튜브가 필요 없습니다. 서버의 ffmpeg 테스트 패턴만 씁니다.
+  </div>
+
+  <div class="row">
+    <button class="btn btn-red" id="btnDrive">주행 모드 시뮬레이션 ON</button>
+    <button class="btn btn-gray" id="btnStart">테스트 스트림 시작</button>
+    <button class="btn btn-gray" id="btnStop">정지</button>
+  </div>
+  <div class="stat" id="st">시작을 누르면 왼쪽은 막히고, 오른쪽 canvas는 시계가 돌아야 성공입니다.</div>
+
+  <div class="compare">
+    <div class="pane">
+      <h3>&lt;video&gt; 태그 <span class="tag bad">Tesla가 막음</span></h3>
+      <video id="blocked" muted playsinline></video>
+      <div class="block" style="margin:0;border:0">
+        paused = <b id="vPaused">?</b><br>
+        currentTime = <b id="vTime">0</b>
+      </div>
+    </div>
+    <div class="pane">
+      <h3>drawImage(video) <span class="tag bad">pause 되면 검정</span></h3>
+      <canvas id="fromVideo"></canvas>
+    </div>
+    <div class="pane">
+      <h3>JSMpeg canvas 우회 <span class="tag good">주행 중에도 재생</span></h3>
+      <canvas id="bypass"></canvas>
+      <div class="block" style="margin:0;border:0">
+        <b id="npFps">0 FPS</b> · <span id="npTitle">대기</span>
+      </div>
+    </div>
+  </div>
+  <audio id="na"></audio>
+
+  <div class="block">
+    <b>판정 체크리스트</b>
+    <div class="check" id="c1">1. WebSocket / WebGL — 아직</div>
+    <div class="check" id="c2">2. 주행 시뮬 ON 일 때 &lt;video&gt; 가 pause 인지 — 아직</div>
+    <div class="check" id="c3">3. 가운데 canvas(drawImage) 가 멈추거나 검정인지 — 아직</div>
+    <div class="check" id="c4">4. 오른쪽 우회 canvas 시계/패턴이 계속 도는지 — 아직</div>
+    <div class="check" id="c5">5. 이 브라우저가 Tesla 인지 — 아직</div>
+  </div>
+</div>
+
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+
+<script src="../config.js?v=4"></script>
+<script src="../js/common.js?v=4"></script>
+<script src="../js/jsmpeg.min.js?v=4"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var blocked = $('blocked');
+  var fromVideo = $('fromVideo');
+  var bypass = $('bypass');
+  var na = $('na');
+  var driveOn = true;
+  var player = null;
+  var srcCanvas = document.createElement('canvas');
+  var srcCtx = srcCanvas.getContext('2d');
+  var fvCtx = fromVideo.getContext('2d');
+  var anim = 0, pauseHook = null, copyHook = null, fpsCount = 0, lastFps = 0;
+
+  srcCanvas.width = 640; srcCanvas.height = 360;
+  fromVideo.width = 640; fromVideo.height = 360;
+  bypass.width = 854; bypass.height = 480;
+
+  function mark(id, ok, text) {
+    var el = $(id);
+    el.innerHTML = text;
+    el.querySelector('b') && (el.querySelector('b').className = ok ? 'ok' : 'fail');
+  }
+
+  function setCheck(id, ok, text) {
+    $(id).innerHTML = text + ' — <b class="' + (ok ? 'ok' : 'fail') + '">' + (ok ? '통과' : '실패') + '</b>';
+  }
+
+  function drawSource() {
+    anim++;
+    var t = anim / 30;
+    srcCtx.fillStyle = '#111';
+    srcCtx.fillRect(0, 0, 640, 360);
+    srcCtx.fillStyle = 'hsl(' + ((anim * 3) % 360) + ',70%,45%)';
+    srcCtx.fillRect((anim * 4) % 640, 80, 120, 200);
+    srcCtx.fillStyle = '#fff';
+    srcCtx.font = '28px sans-serif';
+    srcCtx.fillText('VIDEO TAG  ' + t.toFixed(1) + 's', 24, 50);
+    srcCtx.fillText(driveOn ? 'Drive pause() ON' : 'Park — playing', 24, 320);
+    if (copyHook) {
+      try { fvCtx.drawImage(blocked, 0, 0, 640, 360); } catch (e) {}
+    }
+    $('vPaused').textContent = String(blocked.paused);
+    $('vTime').textContent = (blocked.currentTime || 0).toFixed(2);
+    requestAnimationFrame(drawSource);
+  }
+
+  function attachSourceStream() {
+    if (!srcCanvas.captureStream) {
+      setCheck('c2', false, '2. captureStream 없음 (Tesla는 원래 없음). video 비교는 PC 크롬에서 하세요');
+      return;
+    }
+    var stream = srcCanvas.captureStream(30);
+    blocked.srcObject = stream;
+    blocked.play().catch(function () {});
+  }
+
+  function setDrive(on) {
+    driveOn = on;
+    $('btnDrive').textContent = on ? '주행 모드 시뮬레이션 ON' : '주행 모드 시뮬레이션 OFF';
+    $('btnDrive').className = on ? 'btn btn-red' : 'btn btn-gray';
+    if (pauseHook) { clearInterval(pauseHook); pauseHook = null; }
+    if (on) {
+      pauseHook = setInterval(function () {
+        try { if (!blocked.paused) blocked.pause(); } catch (e) {}
+      }, 80);
+    } else {
+      blocked.play().catch(function () {});
+    }
+  }
+
+  function startBypass() {
+    stopBypass();
+    $('npTitle').textContent = '연결 중...';
+    na.src = tv.url('/api/audio?url=testsrc&quality=480&_=' + Date.now());
+    na.load();
+    na.play().catch(function () {});
+    var wsUrl = tv.ws('/ws/mpeg1?url=testsrc&quality=480');
+    fpsCount = 0; lastFps = Date.now();
+    try {
+      player = new JSMpeg.Player(wsUrl, {
+        canvas: bypass, audio: false, streaming: true, maxBufferSize: 1024 * 1024,
+        pauseWhenHidden: false, preserveDrawingBuffer: true,
+        onVideoDecode: function () {
+          fpsCount++;
+          var now = Date.now();
+          if (now - lastFps >= 1000) {
+            $('npFps').textContent = fpsCount + ' FPS';
+            $('npTitle').textContent = fpsCount >= 8 ? '우회 재생 중' : '프레임 낮음';
+            setCheck('c4', fpsCount >= 8, '4. 오른쪽 우회 canvas 시계/패턴이 계속 도는지');
+            fpsCount = 0; lastFps = now;
+          }
+        }
+      });
+    } catch (e) {
+      $('npTitle').textContent = '오류 ' + e.message;
+      setCheck('c4', false, '4. 우회 플레이어 생성');
+    }
+  }
+
+  function stopBypass() {
+    if (player) { try { player.destroy(); } catch (e) {} player = null; }
+    na.pause(); na.removeAttribute('src'); na.load();
+  }
+
+  $('btnHome').onclick = function () { tv.home(); };
+  $('btnDrive').onclick = function () { setDrive(!driveOn); };
+  $('btnStart').onclick = function () {
+    copyHook = true;
+    startBypass();
+    $('st').textContent = '왼쪽은 멈추고, 오른쪽 숫자가 올라가면 우회 성공입니다.';
+  };
+  $('btnStop').onclick = function () {
+    stopBypass();
+    $('npTitle').textContent = '정지';
+  };
+
+  setInterval(function () {
+    setCheck('c2', driveOn ? blocked.paused : !blocked.paused,
+      '2. 주행 시뮬 ON 일 때 <video> 가 pause 인지 (paused=' + blocked.paused + ')');
+    var sample = fvCtx.getImageData(40, 40, 1, 1).data;
+    var dark = sample[0] + sample[1] + sample[2] < 40;
+    if (driveOn && blocked.paused) {
+      setCheck('c3', true, '3. 가운데는 pause 된 video 를 그리므로 멈추거나 검정이면 정상');
+    } else {
+      setCheck('c3', !dark, '3. 시뮬 OFF 이면 가운데도 색이 움직여야 함');
+    }
+  }, 1000);
+
+  tv.ensurePin(function () {
+    var wsOk = typeof WebSocket !== 'undefined';
+    var glOk = !!document.createElement('canvas').getContext('webgl');
+    setCheck('c1', wsOk && glOk, '1. WebSocket=' + wsOk + ' / WebGL=' + glOk);
+    var isTesla = /QtCarBrowser|Tesla/i.test(navigator.userAgent);
+    setCheck('c5', true, '5. 이 브라우저가 Tesla 인지 — ' + (isTesla ? 'Tesla 감지' : 'PC/일반 (시뮬레이터로 확인)'));
+    drawSource();
+    attachSourceStream();
+    setDrive(true);
+    copyHook = true;
+    startBypass();
+  });
+})();
+</script>
+</body>
+</html>
