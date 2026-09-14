@@ -2548,6 +2548,9 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && fsOn) setFs(false);
+    var el = e.target;
+    var tag = el && el.tagName ? el.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || (el && el.isContentEditable)) return;
     if (e.key === ' ' && playing) { e.preventDefault(); togglePause(); }
     if ((e.key === 'f' || e.key === 'F') && playing) setFs(!fsOn);
   });
