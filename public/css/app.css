@@ -159,7 +159,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .hud-title { font-size: 1.05rem; font-weight: 700; padding-right: 90px; }
 .hud-fps { position: absolute; top: 14px; right: 16px; color: #32d74b; font-size: 0.8rem; }
 .bar-bottom { background: #0f0f0f; padding: 0 10px 10px; }
-.seek-wrap { position: relative; height: 28px; margin: 4px 0 2px; }
+.seek-wrap { position: relative; height: 28px; margin: 4px 0 2px; cursor: pointer; z-index: 6; }
 .seek-track {
   position: absolute; left: 0; right: 0; top: 11px; height: 6px;
   background: #3f3f3f; border-radius: 3px; overflow: hidden;
@@ -170,6 +170,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   -webkit-transition: width 0.35s linear;
   transition: width 0.35s linear;
 }
+.player-box.paused .seek-buf { background: #c8c8c8; }
 .seek-play {
   position: absolute; left: 0; top: 0; height: 100%; width: 0;
   background: #ff0000;
