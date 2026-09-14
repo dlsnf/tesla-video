@@ -176,6 +176,8 @@ function attachWsStream(ws, input, quality, start) {
   let ffmpeg = null;
   let closed = false;
   let flushTimer = null;
+  let clientHold = false;
+  let flushWs = function () {};
   const slot = { kind: 'video', kill: function () { if (ffmpeg) killTree(ffmpeg); } };
   active.add(slot);
 
@@ -190,6 +192,25 @@ function attachWsStream(ws, input, quality, start) {
 
   ws.on('close', cleanup);
   ws.on('error', cleanup);
+  ws.on('message', function (data) {
+    var s = '';
+    try {
+      if (Buffer.isBuffer(data)) s = data.toString();
+      else if (typeof data === 'string') s = data;
+      else return;
+      if (!s || s.charAt(0) !== '{') return;
+      var msg = JSON.parse(s);
+      if (!msg || !msg.type) return;
+      if (msg.type === 'hold') {
+        clientHold = true;
+        try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.pause) ffmpeg.stdout.pause(); } catch (e0) {}
+      } else if (msg.type === 'go') {
+        clientHold = false;
+        try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.resume) ffmpeg.stdout.resume(); } catch (e1) {}
+        flushWs();
+      }
+    } catch (e2) {}
+  });
 
   sendStatus(ws, '영상 주소를 확인하는 중...');
 
@@ -203,13 +224,13 @@ function attachWsStream(ws, input, quality, start) {
     var pending = [];
     var pendingBytes = 0;
     var errBuf = '';
-    function flushWs() {
+    flushWs = function () {
       if (ws.readyState !== 1) {
         pending = [];
         pendingBytes = 0;
         return;
       }
-      if (ws.bufferedAmount > 1024 * 1024) {
+      if (clientHold || ws.bufferedAmount > 1024 * 1024) {
         try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.pause) ffmpeg.stdout.pause(); } catch (e) {}
         return;
       }
@@ -219,7 +240,7 @@ function attachWsStream(ws, input, quality, start) {
       pending = [];
       pendingBytes = 0;
       try { ws.send(out); } catch (e) { cleanup(); }
-    }
+    };
     flushTimer = setInterval(flushWs, 70);
     slot.kill = function () { if (flushTimer) clearInterval(flushTimer); if (ffmpeg) killTree(ffmpeg); };
 
