@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=91">
+<link rel="stylesheet" href="../css/app.css?v=97">
 </head>
 <body>
 <div class="wrap" id="page">
@@ -50,35 +50,44 @@
         <div class="seek-knob" id="seekKnob"></div>
         <input id="seek" class="seek-hit" type="range" min="0" max="1000" value="0">
       </div>
-      <div class="bar-row">
-        <button class="ctrl play" id="btnPause" type="button">일시정지</button>
-        <button class="ctrl" id="btnFromStart" type="button">처음부터</button>
-        <button class="ctrl" id="btnBack" type="button">-10</button>
-        <button class="ctrl" id="btnFwd" type="button">+10</button>
-        <span class="time" id="npTime">0:00</span>
-        <span class="grow"></span>
-        <span class="vol-wrap">
-          <button class="vol-ico" id="btnMute" type="button">♪</button>
-          <input id="vol" class="vol" type="range" min="0" max="100" value="100">
-        </span>
-        <button class="ctrl qbtn on" data-q="360" type="button">360</button>
-        <button class="ctrl qbtn" data-q="480" type="button">480</button>
-        <button class="ctrl qbtn" data-q="720" type="button">720</button>
-        <button class="ctrl" id="btnSyncToggle" type="button">싱크</button>
-        <button class="ctrl fs" id="btnFs" type="button">전체화면</button>
+      <div class="bar-main">
+        <div class="bar-group">
+          <button class="ctrl play" id="btnPause" type="button">일시정지</button>
+          <button class="ctrl" id="btnFromStart" type="button">처음부터</button>
+          <button class="ctrl" id="btnBack" type="button">-10</button>
+          <button class="ctrl" id="btnFwd" type="button">+10</button>
+          <span class="time" id="npTime">0:00</span>
+        </div>
+        <div class="bar-group">
+          <span class="vol-wrap">
+            <button class="vol-ico" id="btnMute" type="button">♪</button>
+            <input id="vol" class="vol" type="range" min="0" max="100" value="100">
+          </span>
+          <button class="ctrl fs" id="btnFs" type="button">전체화면</button>
+        </div>
       </div>
-      <div id="syncPanel" class="sync-panel" style="display:none">
-        <div class="sync-label" id="syncLabel">영상과 소리를 한 줄로 맞춤</div>
-        <div class="sync-row">
-          <button class="ctrl" data-sync="-1" type="button">-1초</button>
-          <button class="ctrl" data-sync="-0.5" type="button">-0.5</button>
-          <button class="ctrl" data-sync="-0.1" type="button">-0.1</button>
-          <input id="syncRange" type="range" min="-80" max="80" value="0">
-          <button class="ctrl" data-sync="0.1" type="button">+0.1</button>
-          <button class="ctrl" data-sync="0.5" type="button">+0.5</button>
-          <button class="ctrl" data-sync="1" type="button">+1초</button>
-          <button class="ctrl play" id="btnAutoSync" type="button">지금 싱크</button>
-          <button class="ctrl" id="btnSyncReset" type="button">0으로</button>
+      <div class="bar-main bar-opts">
+        <div class="bar-group">
+          <span class="bar-lab">화질</span>
+          <span class="bar-seg">
+            <button class="ctrl qbtn on" data-q="360" type="button">360</button>
+            <button class="ctrl qbtn" data-q="480" type="button">480</button>
+            <button class="ctrl qbtn" data-q="720" type="button">720</button>
+          </span>
+        </div>
+        <div class="bar-group">
+          <span class="bar-lab">프레임</span>
+          <span class="bar-seg">
+            <button class="ctrl fbtn on" data-fps="24" type="button">24</button>
+            <button class="ctrl fbtn" data-fps="30" type="button">30</button>
+          </span>
+        </div>
+        <div class="bar-group">
+          <span class="bar-lab">비트레이트</span>
+          <span class="bar-seg">
+            <button class="ctrl rbtn on" data-vbr="low" type="button">낮음</button>
+            <button class="ctrl rbtn" data-vbr="norm" type="button">보통</button>
+          </span>
         </div>
       </div>
     </div>
@@ -146,9 +155,9 @@
   </div>
 </div>
 
-<script src="../config.js?v=91"></script>
-<script src="../js/common.js?v=91"></script>
-<script src="../js/jsmpeg.min.js?v=91"></script>
-<script src="../js/player.js?v=91"></script>
+<script src="../config.js?v=97"></script>
+<script src="../js/common.js?v=97"></script>
+<script src="../js/jsmpeg.min.js?v=97"></script>
+<script src="../js/player.js?v=97"></script>
 </body>
 </html>

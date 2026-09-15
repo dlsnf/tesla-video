@@ -55,7 +55,7 @@ function netInput(url, coarse, isLive) {
     '-referer', 'https://www.youtube.com/',
   ];
   if (!isLive && coarse > 0) a.push('-ss', String(coarse));
-  a.push('-readrate', isLive ? '1.0' : '1.25');
+  a.push('-readrate', isLive ? '1.0' : '1.1');
   a.push('-i', url);
   return a;
 }
@@ -69,8 +69,8 @@ function encodeTs(info) {
     '-q:v', '5',
     '-b:v', info.bitrate || '1000k',
     '-bf', '0',
-    '-vf', 'fps=30,scale=' + (info.scale || '640:360') + ':flags=fast_bilinear,setsar=1,setpts=PTS-STARTPTS',
-    '-af', 'aresample=44100:async=1:first_pts=0,asetpts=PTS-STARTPTS',
+    '-vf', 'fps=' + (info.fps === 30 ? 30 : 24) + ',scale=' + (info.scale || '640:360') + ':flags=fast_bilinear,setsar=1,setpts=PTS-STARTPTS',
+    '-af', 'aresample=44100:first_pts=0,asetpts=PTS-STARTPTS',
     '-c:a', 'mp2',
     '-b:a', '192k',
     '-ar', '44100',
@@ -89,7 +89,7 @@ function startTestVideo(info) {
     '-hide_banner', '-loglevel', 'error',
     '-re',
     '-f', 'lavfi',
-    '-i', 'testsrc2=size=' + wh[0] + 'x' + wh[1] + ':rate=30',
+    '-i', 'testsrc2=size=' + wh[0] + 'x' + wh[1] + ':rate=' + (info.fps === 30 ? 30 : 24),
     '-f', 'lavfi',
     '-i', 'sine=frequency=440:sample_rate=44100',
     '-map', '0:v:0',
@@ -161,7 +161,7 @@ function allowedPlayInput(input) {
   }
 }
 
-function attachWsStream(ws, input, quality, start) {
+function attachWsStream(ws, input, quality, start, extra) {
   if (!allowedPlayInput(input)) {
     sendJson(ws, { type: 'error', message: 'YouTube/Twitch 주소만 재생할 수 있습니다' });
     ws.close();
@@ -218,28 +218,64 @@ function attachWsStream(ws, input, quality, start) {
     if (closed) return;
     sendJson(ws, { type: 'meta', title: info.title, duration: info.duration, isLive: info.isLive, id: info.id });
     sendStatus(ws, 'MPEG1 스트림 시작...');
+    info.fps = extra && extra.fps === 30 ? 30 : 24;
+    info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
     ffmpeg = startVideo(info, start);
     slot.kill = function () { if (ffmpeg) killTree(ffmpeg); };
 
     var pending = [];
     var pendingBytes = 0;
     var errBuf = '';
+    var SEND_CAP = 256 * 1024;
+    var PENDING_CAP = 256 * 1024;
+    function pauseOut() {
+      try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.pause) ffmpeg.stdout.pause(); } catch (e) {}
+    }
+    function resumeOut() {
+      if (clientHold || pendingBytes >= PENDING_CAP) return;
+      try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.resume) ffmpeg.stdout.resume(); } catch (e) {}
+    }
     flushWs = function () {
       if (ws.readyState !== 1) {
         pending = [];
         pendingBytes = 0;
         return;
       }
-      if (clientHold || ws.bufferedAmount > 1024 * 1024) {
-        try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.pause) ffmpeg.stdout.pause(); } catch (e) {}
+      if (clientHold || ws.bufferedAmount > SEND_CAP) {
+        pauseOut();
         return;
       }
-      try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.resume) ffmpeg.stdout.resume(); } catch (e) {}
-      if (!pendingBytes) return;
-      var out = Buffer.concat(pending, pendingBytes);
-      pending = [];
-      pendingBytes = 0;
-      try { ws.send(out); } catch (e) { cleanup(); }
+      if (!pendingBytes) {
+        resumeOut();
+        return;
+      }
+      var take = pendingBytes > 32 * 1024 ? 32 * 1024 : pendingBytes;
+      var out;
+      if (take === pendingBytes) {
+        out = Buffer.concat(pending, pendingBytes);
+        pending = [];
+        pendingBytes = 0;
+      } else {
+        var acc = [];
+        var left = take;
+        while (left > 0 && pending.length) {
+          var chunk = pending[0];
+          if (chunk.length <= left) {
+            acc.push(pending.shift());
+            pendingBytes -= chunk.length;
+            left -= chunk.length;
+          } else {
+            acc.push(chunk.subarray(0, left));
+            pending[0] = chunk.subarray(left);
+            pendingBytes -= left;
+            left = 0;
+          }
+        }
+        out = Buffer.concat(acc, take);
+      }
+      try { ws.send(out); } catch (e) { cleanup(); return; }
+      if (pendingBytes >= PENDING_CAP || ws.bufferedAmount > SEND_CAP) pauseOut();
+      else resumeOut();
     };
     flushTimer = setInterval(flushWs, 70);
     slot.kill = function () { if (flushTimer) clearInterval(flushTimer); if (ffmpeg) killTree(ffmpeg); };
@@ -247,7 +283,8 @@ function attachWsStream(ws, input, quality, start) {
     ffmpeg.stdout.on('data', function (chunk) {
       pending.push(chunk);
       pendingBytes += chunk.length;
-      if (pendingBytes >= 48 * 1024) flushWs();
+      if (pendingBytes >= PENDING_CAP) pauseOut();
+      if (pendingBytes >= 32 * 1024) flushWs();
     });
     ffmpeg.stderr.on('data', function (d) {
       errBuf += d.toString();

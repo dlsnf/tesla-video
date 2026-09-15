@@ -1,7 +1,7 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var stage = $('stage'), na = $('na'), st = $('st'), list = $('list');
-  var player = null, playing = null, quality = 360, startAt = 0;
+  var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, startAt = 0;
   var duration = 0, isLive = false, clock0 = 0, fpsCount = 0, lastFps = 0;
   var bufEnd = 0;
   var paused = false, tickTimer = null, syncTimer = null, forceTimer = null, audioTimer = null;
@@ -13,11 +13,17 @@
   var resumeHeard = 0;
   var resumePending = false;
   var resumeSyncTimer = null;
-  var AUDIO_QUEUE_SEC = 1.2;
-  var VIDEO_CATCH_FRAMES = 5;
+  var AUDIO_QUEUE_SEC = 3.5;
+  var PREROLL_SEC = 1.5;
+  var VIDEO_CATCH_FRAMES = 2;
+  var prerolling = false;
+  var prerollAt = 0;
+  var rebuffering = false;
   var netBytes = 0;
   var pauseNet0 = -1;
   var streamHeld = false;
+  var needStreamRestart = false;
+  var videoFail = 0;
   var audioMediaCursor = 0;
   var videoShownAt = 0;
   var videoFrames = 0;
@@ -30,7 +36,6 @@
   var useHttpAudio = false, videoStartWall = 0;
   var fsOn = false, tapHide = null;
   var soundUnlockBound = false, soundResyncing = false, wantSoundHint = false;
-  var syncOffset = 0;
   var currentFeed = 'home';
   var videoAr = 16 / 9;
   var favIds = {};
@@ -1103,7 +1108,7 @@
   }
 
   function skipVideoToSound(pl) {
-    if (paused || !pl || !pl.video) return;
+    if (prerolling || paused || !pl || !pl.video) return;
     var heard = targetHeard();
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
@@ -1116,7 +1121,7 @@
       markCaughtUp();
       return;
     }
-    if (heard - vt > 0.04) videoCatching = true;
+    if (heard - vt > 0.08) videoCatching = true;
     var cap = videoCatching ? VIDEO_CATCH_FRAMES : 1;
     var i = 0;
     while (i < cap) {
@@ -1124,12 +1129,18 @@
       vt = pl.video.currentTime;
       if (!(heard > 0) || !isFinite(vt)) break;
       if (vt >= heard - 0.02) {
+        videoFail = 0;
         markCaughtUp();
         break;
       }
-      if (!pl.video.decode()) break;
+      if (!pl.video.decode()) {
+        videoFail++;
+        break;
+      }
+      videoFail = 0;
       i++;
     }
+    if (shouldRestartFromSound(heard, vt)) needStreamRestart = true;
     if (videoCatching) {
       heard = targetHeard();
       vt = pl.video.currentTime;
@@ -1140,7 +1151,7 @@
   }
 
   function requestSoundSync() {
-    if (paused || !player) return;
+    if (prerolling || paused || !player) return;
     videoCatching = true;
     skipVideoToSound(player);
   }
@@ -1212,7 +1223,7 @@
 
   function packedAhead() {
     try {
-      var vRate = quality >= 480 ? 125000 : 75000;
+      var vRate = videoByteRate();
       var sec = Math.max(
         bufferLeftSec(player && player.audio, 24000),
         bufferLeftSec(player && player.video, vRate)
@@ -1221,6 +1232,14 @@
       if (sec > cap) sec = cap;
       return Math.max(0, sec);
     } catch (e) { return 0; }
+  }
+
+  function videoByteRate() {
+    var kb = 600;
+    if (quality >= 720) kb = vbrLow ? 1000 : 1500;
+    else if (quality >= 480) kb = vbrLow ? 700 : 1000;
+    else kb = vbrLow ? 400 : 600;
+    return (kb * 1000) / 8;
   }
 
   function remainSec() {
@@ -1263,21 +1282,44 @@
     var fill = decoderFill();
     var ahead = packedAhead();
     var remain = remainSec();
-    var wantHold = fill >= 0.75;
+    var wantHold = fill >= 0.65;
     if (paused) {
       if (ahead >= remain - 0.2) wantHold = true;
-    } else if (ahead >= 4) {
+    } else if (ahead >= 6) {
       wantHold = true;
     }
-    if (!paused && videoCatching && fill < 0.9) wantHold = false;
     if (wantHold) {
       sendStreamCtrl(true);
       return;
     }
-    var wantGo = fill <= 0.5;
+    var wantGo = fill <= 0.42;
     if (paused) wantGo = wantGo && ahead < remain - 0.8;
-    else wantGo = wantGo && ahead <= 2.2;
+    else wantGo = wantGo && ahead <= 2.5;
     if (wantGo) sendStreamCtrl(false);
+  }
+
+  function shouldRestartFromSound(heard, vt) {
+    if (paused || prerolling || rebuffering || isLive || !videoStartWall) return false;
+    if (Date.now() - videoStartWall < 4000) return false;
+    if (Date.now() - lastSyncRestart < 12000) return false;
+    if (!(heard > 0) || !isFinite(vt)) return false;
+    var behind = heard - vt;
+    if (behind > 0.7 && videoFail >= 8 && packedAhead() > 0.25) return true;
+    if (behind > 2.5 && videoFail >= 4) return true;
+    return false;
+  }
+
+  function restartFromSound() {
+    if (paused || !playing || isLive || soundResyncing) return;
+    if (Date.now() - lastSyncRestart < 12000) return;
+    var src = playing;
+    var sec = currentPos();
+    if (!(sec >= 0) || !src) return;
+    lastSyncRestart = Date.now();
+    soundResyncing = true;
+    needStreamRestart = false;
+    videoFail = 0;
+    playUrl(src, sec);
   }
 
   function bufferedAhead() {
@@ -1305,6 +1347,7 @@
       var room = this.bytes.length - this.byteLength;
       if (room < buf.length) {
         sendStreamCtrl(true);
+        needStreamRestart = true;
         return;
       }
       this.bytes.set(buf, this.byteLength);
@@ -1366,6 +1409,11 @@
     pauseNet0 = -1;
     resumeAt = 0;
     streamHeld = false;
+    needStreamRestart = false;
+    videoFail = 0;
+    prerolling = false;
+    prerollAt = 0;
+    rebuffering = false;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
@@ -1397,7 +1445,7 @@
     }
     applyChrome();
     $('npTitle').textContent = '불러오는 중...';
-    $('npFps').textContent = quality + 'p · 0 FPS';
+    $('npFps').textContent = quality + 'p · ' + fps + 'fps · 0 FPS';
     stage.width = 640;
     stage.height = 360;
     videoAr = 16 / 9;
@@ -1405,11 +1453,13 @@
     tv.get('/api/media/info?url=' + encodeURIComponent(src) + '&quality=' + quality, function (code, info) {
       if (!stillReq(playSeq)) return;
       if (code === 401) {
+        soundResyncing = false;
         setStatus('PIN이 필요합니다');
         tv.ensurePin(function () { if (stillReq(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
         return;
       }
       if (!info || !info.ok) {
+        soundResyncing = false;
         setStatus((info && info.error) || '영상을 열 수 없습니다. 다른 영상을 선택해 보세요.');
         if ($('npTitle')) $('npTitle').textContent = '재생할 수 없음';
         return;
@@ -1509,7 +1559,7 @@
   }
 
   function wsUrlFor(src, start) {
-    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&start=' + encodeURIComponent(String(start || 0)));
+    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)));
   }
 
   function startHttpAudio(src) {
@@ -1608,7 +1658,6 @@
   }
 
   function startPipes(src) {
-    lastApplied = null;
     useHttpAudio = false;
     videoStartWall = 0;
     unlockAudio();
@@ -1650,6 +1699,7 @@
 
     tickTimer = setInterval(function () {
       if (!playing) return;
+      if (prerolling && !paused) setStatus('불러오는 중');
       if (paused) {
         hookNetBytes();
         applyStreamHold();
@@ -1679,8 +1729,7 @@
       requestSoundSync();
     }, 2000);
 
-    if ($('syncLabel')) $('syncLabel').textContent = '영상은 지금 나오는 소리에 맞춤 (소리는 그대로, 화면만 맞춤)';
-    setStatus('재생');
+    setStatus(paused ? '일시정지 · 미리 받는 중' : '불러오는 중');
   }
 
   function patchAudioClicks() {
@@ -1709,25 +1758,57 @@
       return Math.max(0, this.context.currentTime - this.mediaOrigin);
     };
     WA.prototype.play = function (rate, left, right) {
-      if (paused || !this.enabled) return;
+      if (paused) return;
+      if (prerolling) {
+        if (!this._pending) this._pending = [];
+        this._pending.push({
+          rate: rate,
+          left: left.slice ? left.slice() : new Float32Array(left),
+          right: right.slice ? right.slice() : new Float32Array(right)
+        });
+        return;
+      }
+      if (!this.enabled) return;
       this.unlocked = true;
       try {
         if (this.context && this.context.state !== 'running' && this.context.resume) this.context.resume();
       } catch (e) {}
       var ctx = this.context;
-      var buf = ctx.createBuffer(2, left.length, rate);
-      buf.getChannelData(0).set(left);
-      buf.getChannelData(1).set(right);
+      var now = ctx.currentTime;
+      var nSamp = left.length;
+      var dur = nSamp / rate;
+      var offset = 0;
+      if (this.startTime < now) {
+        offset = now - this.startTime;
+        if (offset >= dur) {
+          this.startTime += dur;
+          audioMediaCursor += dur;
+          return;
+        }
+      }
+      var buf = ctx.createBuffer(2, nSamp, rate);
+      var ch0 = buf.getChannelData(0);
+      var ch1 = buf.getChannelData(1);
+      ch0.set(left);
+      ch1.set(right);
+      if (offset > 0) {
+        var fadeAt = Math.floor(offset * rate);
+        var fadeN = Math.min(64, nSamp - fadeAt);
+        var f = 0;
+        for (; f < fadeN; f++) {
+          var g = f / fadeN;
+          ch0[fadeAt + f] *= g;
+          ch1[fadeAt + f] *= g;
+        }
+      }
       var src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(this.destination);
-      var now = ctx.currentTime;
-      var dur = buf.duration;
-      if (this.startTime < now) this.startTime = now;
+      var when = this.startTime + offset;
       if (Math.abs(this.gain.gain.value - this.volume) > 0.01) this.gain.gain.value = this.volume;
-      src._mediaAt = audioMediaCursor;
-      src._ctxAt = this.startTime;
-      src._dur = dur;
+      src._mediaAt = audioMediaCursor + offset;
+      src._ctxAt = when;
+      src._dur = dur - offset;
       var out = this;
       src.onended = function () {
         try { src.disconnect(); } catch (e2) {}
@@ -1738,12 +1819,59 @@
           else k++;
         }
       };
-      src.start(this.startTime);
+      try { src.start(when, offset); } catch (e3) { src.start(when); }
       this.startTime += dur;
       audioMediaCursor += dur;
       if (!this._srcs) this._srcs = [];
       this._srcs.push(src);
     };
+  }
+
+  function pendingAudioSec(out) {
+    var p = out && out._pending;
+    if (!p || !p.length) return 0;
+    var s = 0, i;
+    for (i = 0; i < p.length; i++) s += p[i].left.length / p[i].rate;
+    return s;
+  }
+
+  function flushPrerollAudio(out) {
+    if (!out) return;
+    var pend = out._pending || [];
+    out._pending = [];
+    prerolling = false;
+    rebuffering = false;
+    try {
+      var ctx = out.context;
+      var now = ctx ? ctx.currentTime : 0;
+      if (!(out.startTime > now)) out.startTime = now;
+      if (ctx && ctx.state !== 'running' && ctx.resume) ctx.resume();
+    } catch (e0) {}
+    var i;
+    for (i = 0; i < pend.length; i++) {
+      out.play(pend[i].rate, pend[i].left, pend[i].right);
+    }
+  }
+
+  function beginRebuffer() {
+    if (paused || prerolling || !player) return;
+    prerolling = true;
+    rebuffering = true;
+    prerollAt = Date.now();
+    sendStreamCtrl(false);
+    try {
+      var ctx = player.audioOut && player.audioOut.context;
+      if (ctx && ctx.state === 'running' && ctx.suspend) ctx.suspend();
+    } catch (e) {}
+    setStatus('불러오는 중');
+  }
+
+  function shouldRebuffer() {
+    if (paused || prerolling || !player) return false;
+    if (videoStartWall && Date.now() - videoStartWall < 2500) return false;
+    var q = queuedAudio();
+    var packed = packedAhead();
+    return q < 0.4 && packed < 0.3;
   }
 
   function patchMpegPacing() {
@@ -1755,16 +1883,40 @@
       if (this.audioOut) {
         this.audioOut.unlocked = true;
         try {
-          if (this.audioOut.context && this.audioOut.context.state !== 'running' && this.audioOut.context.resume) {
+          if (!prerolling && this.audioOut.context && this.audioOut.context.state !== 'running' && this.audioOut.context.resume) {
             this.audioOut.context.resume();
           }
         } catch (e) {}
       }
+      if (!prerolling && shouldRebuffer()) {
+        beginRebuffer();
+      }
+      if (prerolling) {
+        var need = isLive ? 0.8 : PREROLL_SEC;
+        var n = 0;
+        while (this.audio && pendingAudioSec(this.audioOut) < need && n < 24) {
+          n++;
+          if (!this.audio.decode()) break;
+        }
+        if (this.video && this.video.currentTime === 0) this.video.decode();
+        var readyA = pendingAudioSec(this.audioOut);
+        var readyV = this.video && this.video.currentTime > 0;
+        var waited = prerollAt ? (Date.now() - prerollAt) : 0;
+        var minA = rebuffering ? 0.8 : 0.3;
+        var maxWait = rebuffering ? 20000 : 8000;
+        if ((readyA >= need && readyV) || (waited > maxWait && readyA > minA && readyV)) {
+          flushPrerollAudio(this.audioOut);
+          setStatus('재생');
+        } else {
+          applyStreamHold();
+          return;
+        }
+      }
       if (this.audio && this.audioOut && this.audioOut.enabled) {
         var queued = this.audioOut.enqueuedTime || 0;
-        var n = 0;
-        while (queued < AUDIO_QUEUE_SEC && n < 48) {
-          n++;
+        var n2 = 0;
+        while (queued < AUDIO_QUEUE_SEC && n2 < 48) {
+          n2++;
           if (!this.audio.decode()) break;
           queued = this.audioOut.enqueuedTime || 0;
         }
@@ -1772,6 +1924,7 @@
       if (!this.video) return;
       skipVideoToSound(this);
       applyStreamHold();
+      if (needStreamRestart) restartFromSound();
     };
   }
 
@@ -1791,7 +1944,12 @@
     resumeHeard = 0;
     resumePending = false;
     streamHeld = false;
-    lastSyncRestart = Date.now();
+    needStreamRestart = false;
+    videoFail = 0;
+    soundResyncing = false;
+    prerolling = true;
+    prerollAt = Date.now();
+    rebuffering = false;
     try {
       patchMpegPacing();
       patchAudioClicks();
@@ -1802,7 +1960,7 @@
         maxBufferSize: 8 * 1024 * 1024,
         audioBufferSize: 2 * 1024 * 1024,
         videoBufferSize: 4 * 1024 * 1024,
-        maxAudioLag: 1.8,
+        maxAudioLag: 4.5,
         disableWebAssembly: true,
         decodeFirstFrame: false,
         pauseWhenHidden: false,
@@ -1817,7 +1975,7 @@
           fpsCount++;
           var now = Date.now();
           if (now - lastFps >= 1000) {
-            $('npFps').textContent = quality + 'p · ' + fpsCount + ' FPS';
+            $('npFps').textContent = quality + 'p · ' + fps + 'fps · ' + fpsCount + ' FPS';
             fpsCount = 0;
             lastFps = now;
           }
@@ -2077,16 +2235,6 @@
     setTimeout(fitStage, 80);
   }
 
-  function syncLabel() {
-    if ($('syncRange')) $('syncRange').value = String(Math.round(syncOffset * 10));
-  }
-
-  function nudgeSync(delta) {
-    syncOffset = Math.max(-8, Math.min(8, Math.round((syncOffset + delta) * 10) / 10));
-    syncLabel();
-  }
-
-  var lastApplied = null;
   function applyPlayerVol() {
     var pct = parseInt(($('vol') && $('vol').value) || '100', 10);
     var v = Math.max(0, Math.min(100, pct)) / 100;
@@ -2099,10 +2247,6 @@
   function snapVideoToAudio() {
     requestSoundSync();
   }
-  function snapSync() { snapVideoToAudio(); }
-  function autoSync() { snapVideoToAudio(); }
-  function applySync() { snapVideoToAudio(); }
-  function resetLastApplied() { lastApplied = null; }
 
   function goWatch(id, url) {
     saveBrowseState();
@@ -2213,10 +2357,6 @@
   if ($('btnBack')) $('btnBack').onclick = function () { seekTo(currentPos() - 10); };
   if ($('btnFwd')) $('btnFwd').onclick = function () { seekTo(currentPos() + 10); };
   if ($('btnFs')) $('btnFs').onclick = function (e) { if (e) e.stopPropagation(); setFs(!fsOn); };
-  if ($('btnSyncToggle')) $('btnSyncToggle').onclick = function () {
-    var p = $('syncPanel');
-    if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
-  };
   var lastVol = 100;
   function setVol(pct) {
     pct = Math.max(0, Math.min(100, pct));
@@ -2295,39 +2435,26 @@
     };
   }
 
-  if ($('syncRange')) {
-    $('syncRange').oninput = function () {
-      syncOffset = (parseInt(this.value, 10) || 0) / 10;
-      syncLabel();
-    };
-    $('syncRange').onchange = function () { resetLastApplied(); applySync(); };
+  function bindToggleBtns(sel, cls, apply) {
+    var btns = document.querySelectorAll(sel);
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].onclick = function () {
+        apply(this);
+        for (var j = 0; j < btns.length; j++) btns[j].className = 'ctrl ' + cls;
+        this.className = 'ctrl ' + cls + ' on';
+        if (playing) playUrl(playing, currentPos());
+      };
+    }
   }
-
-  var syncBtns = document.querySelectorAll('[data-sync]');
-  for (var s = 0; s < syncBtns.length; s++) {
-    syncBtns[s].onclick = function () {
-      nudgeSync(parseFloat(this.getAttribute('data-sync')) || 0);
-      resetLastApplied();
-      applySync();
-    };
-  }
-  if ($('btnSyncReset')) $('btnSyncReset').onclick = function () {
-    syncOffset = 0; lastApplied = null; syncLabel(); applySync();
-  };
-  if ($('btnAutoSync')) $('btnAutoSync').onclick = function () {
-    lastApplied = null;
-    snapVideoToAudio();
-  };
-
-  var qbtns = document.querySelectorAll('.qbtn');
-  for (var i = 0; i < qbtns.length; i++) {
-    qbtns[i].onclick = function () {
-      quality = parseInt(this.getAttribute('data-q'), 10) || 480;
-      for (var j = 0; j < qbtns.length; j++) qbtns[j].className = 'ctrl qbtn';
-      this.className = 'ctrl qbtn on';
-      if (playing) playUrl(playing, currentPos());
-    };
-  }
+  bindToggleBtns('.qbtn', 'qbtn', function (el) {
+    quality = parseInt(el.getAttribute('data-q'), 10) || 360;
+  });
+  bindToggleBtns('.fbtn', 'fbtn', function (el) {
+    fps = parseInt(el.getAttribute('data-fps'), 10) === 30 ? 30 : 24;
+  });
+  bindToggleBtns('.rbtn', 'rbtn', function (el) {
+    vbrLow = el.getAttribute('data-vbr') === 'low';
+  });
 
   function eventSubEl(from) {
     var t = from;
@@ -2556,7 +2683,6 @@
   });
 
   tv.ensurePin(function () {
-    syncLabel();
     tv.get('/api/auth/status', function (c, d) {
       currentPin = (d && d.pin) || '';
       paintLogoutLabel();

@@ -155,8 +155,13 @@ function scaleForQuality(quality) {
   return sizeForQuality(quality, 16, 9).scale;
 }
 
-function bitrateForQuality(quality) {
+function bitrateForQuality(quality, low) {
   const q = parseInt(quality, 10) || 360;
+  if (low) {
+    if (q <= 360) return '400k';
+    if (q <= 480) return '700k';
+    return '1000k';
+  }
   if (q <= 360) return '600k';
   if (q <= 480) return '1000k';
   return '1500k';
