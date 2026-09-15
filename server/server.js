@@ -662,12 +662,14 @@ wss.on('connection', function (ws, req, parsed) {
   const input = parsed.query.url || parsed.query.channel || parsed.query.id || '';
   const quality = parsed.query.quality || 480;
   const start = stream.parseStart(parsed.query.start);
+  const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
+  const low = parsed.query.vbr === 'low';
   if (!input) {
     ws.send(JSON.stringify({ type: 'error', message: 'url/channel 이 필요합니다' }));
     ws.close();
     return;
   }
-  stream.attachWsStream(ws, input, quality, start);
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low });
 });
 
 function shutdown() {
