@@ -24,6 +24,8 @@
   var streamHeld = false;
   var needStreamRestart = false;
   var videoFail = 0;
+  var ended = false;
+  var streamEnded = false;
   var audioMediaCursor = 0;
   var videoShownAt = 0;
   var videoFrames = 0;
@@ -1108,7 +1110,7 @@
   }
 
   function skipVideoToSound(pl) {
-    if (prerolling || paused || !pl || !pl.video) return;
+    if (ended || prerolling || paused || !pl || !pl.video) return;
     var heard = targetHeard();
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
@@ -1151,7 +1153,7 @@
   }
 
   function requestSoundSync() {
-    if (prerolling || paused || !player) return;
+    if (ended || prerolling || paused || !player) return;
     videoCatching = true;
     skipVideoToSound(player);
   }
@@ -1274,8 +1276,53 @@
     } catch (e) {}
   }
 
+  function nearEnd() {
+    if (isLive || !(duration > 0)) return false;
+    return currentPos() >= Math.max(0, duration - 1.5);
+  }
+
+  function disableReconnect() {
+    try {
+      if (!player || !player.source) return;
+      player.source.shouldAttemptReconnect = false;
+      player.source.reconnectInterval = 0;
+      if (player.source.reconnectTimeoutId) {
+        clearTimeout(player.source.reconnectTimeoutId);
+        player.source.reconnectTimeoutId = 0;
+      }
+    } catch (e) {}
+  }
+
+  function markStreamEnded() {
+    if (isLive || ended) return;
+    streamEnded = true;
+    disableReconnect();
+  }
+
+  function supplyDrained() {
+    return queuedAudio() < 0.2 && packedAhead() < 0.15;
+  }
+
+  function finishPlayback() {
+    if (ended || !playing || isLive) return;
+    ended = true;
+    streamEnded = true;
+    prerolling = false;
+    rebuffering = false;
+    needStreamRestart = false;
+    videoCatching = false;
+    paused = true;
+    pausePos = duration > 0 ? duration : currentPos();
+    disableReconnect();
+    holdPlayback();
+    if ($('btnPause')) $('btnPause').textContent = '재생';
+    applyChrome();
+    paintSeekBar();
+    setStatus('종료');
+  }
+
   function applyStreamHold() {
-    if (!player || isLive) {
+    if (ended || !player || isLive) {
       if (isLive) sendStreamCtrl(false);
       return;
     }
@@ -1284,7 +1331,7 @@
     var remain = remainSec();
     var wantHold = fill >= 0.65;
     if (paused) {
-      if (ahead >= remain - 0.2) wantHold = true;
+      if (ahead >= 10 || ahead >= remain - 0.2) wantHold = true;
     } else if (ahead >= 6) {
       wantHold = true;
     }
@@ -1293,13 +1340,13 @@
       return;
     }
     var wantGo = fill <= 0.42;
-    if (paused) wantGo = wantGo && ahead < remain - 0.8;
+    if (paused) wantGo = wantGo && ahead < 8 && ahead < remain - 0.8;
     else wantGo = wantGo && ahead <= 2.5;
     if (wantGo) sendStreamCtrl(false);
   }
 
   function shouldRestartFromSound(heard, vt) {
-    if (paused || prerolling || rebuffering || isLive || !videoStartWall) return false;
+    if (ended || streamEnded || nearEnd() || paused || prerolling || rebuffering || isLive || !videoStartWall) return false;
     if (Date.now() - videoStartWall < 4000) return false;
     if (Date.now() - lastSyncRestart < 12000) return false;
     if (!(heard > 0) || !isFinite(vt)) return false;
@@ -1310,7 +1357,7 @@
   }
 
   function restartFromSound() {
-    if (paused || !playing || isLive || soundResyncing) return;
+    if (ended || streamEnded || nearEnd() || paused || !playing || isLive || soundResyncing) return;
     if (Date.now() - lastSyncRestart < 12000) return;
     var src = playing;
     var sec = currentPos();
@@ -1414,6 +1461,8 @@
     prerolling = false;
     prerollAt = 0;
     rebuffering = false;
+    ended = false;
+    streamEnded = false;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
@@ -1699,6 +1748,11 @@
 
     tickTimer = setInterval(function () {
       if (!playing) return;
+      if (ended) {
+        setStatus('종료');
+        paintSeekBar();
+        return;
+      }
       if (prerolling && !paused) setStatus('불러오는 중');
       if (paused) {
         hookNetBytes();
@@ -1706,7 +1760,7 @@
         paintSeekBar();
         var ahead = packedAhead();
         var remain = remainSec();
-        var full = remain <= 0.5 || ahead >= remain - 0.2 || decoderFill() >= 0.75;
+        var full = remain <= 0.5 || ahead >= 10 || ahead >= remain - 0.2 || decoderFill() >= 0.75;
         if (full && ahead >= 0.5) {
           setStatus('일시정지 · 미리 받기 ' + Math.round(ahead) + '초 · 대기');
         } else if (ahead >= 0.5) {
@@ -1854,7 +1908,7 @@
   }
 
   function beginRebuffer() {
-    if (paused || prerolling || !player) return;
+    if (ended || streamEnded || paused || prerolling || !player) return;
     prerolling = true;
     rebuffering = true;
     prerollAt = Date.now();
@@ -1867,7 +1921,7 @@
   }
 
   function shouldRebuffer() {
-    if (paused || prerolling || !player) return false;
+    if (ended || streamEnded || paused || prerolling || !player) return false;
     if (videoStartWall && Date.now() - videoStartWall < 2500) return false;
     var q = queuedAudio();
     var packed = packedAhead();
@@ -1879,7 +1933,11 @@
     JSMpeg.Player.prototype.__pace = true;
     JSMpeg.Player.prototype.updateForStreaming = function () {
       applyStreamHold();
-      if (paused) return;
+      if (ended || paused) return;
+      if (streamEnded && supplyDrained()) {
+        finishPlayback();
+        return;
+      }
       if (this.audioOut) {
         this.audioOut.unlocked = true;
         try {
@@ -1950,6 +2008,8 @@
     prerolling = true;
     prerollAt = Date.now();
     rebuffering = false;
+    ended = false;
+    streamEnded = false;
     try {
       patchMpegPacing();
       patchAudioClicks();
@@ -1957,6 +2017,7 @@
         canvas: stage,
         audio: true,
         streaming: true,
+        reconnectInterval: 0,
         maxBufferSize: 8 * 1024 * 1024,
         audioBufferSize: 2 * 1024 * 1024,
         videoBufferSize: 4 * 1024 * 1024,
@@ -1966,6 +2027,7 @@
         pauseWhenHidden: false,
         preserveDrawingBuffer: false,
         disableWebAudio: false,
+        onSourceCompleted: function () { markStreamEnded(); },
         onVideoDecode: function () {
           if (!videoStartWall) {
             videoStartWall = Date.now();
@@ -1992,6 +2054,7 @@
       }
       applyPlayerVol();
       fitStage();
+      disableReconnect();
       hookNetBytes();
       setTimeout(hookNetBytes, 200);
       setTimeout(hookNetBytes, 1000);
@@ -2010,7 +2073,13 @@
     if (!src.onMessage) return;
     var orig = src.onMessage.bind(src);
     src.__onMsg = function (ev) {
-      if (ev && typeof ev.data === 'string') return;
+      if (ev && typeof ev.data === 'string') {
+        try {
+          var msg = JSON.parse(ev.data);
+          if (msg && msg.type === 'ended') markStreamEnded();
+        } catch (e0) {}
+        return;
+      }
       try {
         if (ev && ev.data && ev.data.byteLength) netBytes += ev.data.byteLength;
       } catch (e) {}
@@ -2019,6 +2088,16 @@
     src.__byteHook = true;
     src.onMessage = src.__onMsg;
     if (src.socket) src.socket.onmessage = src.__onMsg;
+    if (!src.__endHook) {
+      src.__endHook = true;
+      var origClose = src.onClose ? src.onClose.bind(src) : null;
+      src.onClose = function () {
+        disableReconnect();
+        if (origClose) origClose();
+        if (!ended && playing && (streamEnded || nearEnd())) markStreamEnded();
+      };
+      if (src.socket) src.socket.onclose = src.onClose.bind(src);
+    }
   }
 
   function seekTo(sec) {
@@ -2131,6 +2210,11 @@
 
   function togglePause() {
     if (!playing) return;
+    if (ended) {
+      ended = false;
+      playUrl(playing, 0);
+      return;
+    }
     if (!paused) {
       if (!player) return;
       pausePos = currentPos();

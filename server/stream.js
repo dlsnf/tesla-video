@@ -292,9 +292,12 @@ function attachWsStream(ws, input, quality, start, extra) {
     });
     ffmpeg.on('close', function (code) {
       if (!closed) {
-        var msg = '스트림 종료 (' + code + ')';
-        if (code && errBuf) msg += ' ' + errBuf.replace(/\s+/g, ' ').slice(0, 140);
-        sendJson(ws, { type: 'status', message: msg });
+        if (!code) sendJson(ws, { type: 'ended' });
+        else {
+          var msg = '스트림 종료 (' + code + ')';
+          if (errBuf) msg += ' ' + errBuf.replace(/\s+/g, ' ').slice(0, 140);
+          sendJson(ws, { type: 'status', message: msg });
+        }
         try { ws.close(); } catch (e) {}
       }
       cleanup();
