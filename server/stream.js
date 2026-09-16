@@ -27,10 +27,10 @@ function spawnFfmpeg(args) {
 function ffmpegInputPrefix(start, isLive) {
   const args = [
     '-hide_banner', '-loglevel', 'error',
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '30',
   ];
+  if (isLive) {
+    args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '30');
+  }
   if (!isLive && start > 0) {
     args.push('-ss', String(start));
   }
@@ -47,13 +47,15 @@ function seekParts(start, isLive) {
 
 function netInput(url, coarse, isLive) {
   const a = [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '30',
     '-thread_queue_size', '1024',
     '-user_agent', YT_UA,
     '-referer', 'https://www.youtube.com/',
   ];
+  if (isLive) {
+    a.unshift('-reconnect_delay_max', '30');
+    a.unshift('-reconnect_streamed', '1');
+    a.unshift('-reconnect', '1');
+  }
   if (!isLive && coarse > 0) a.push('-ss', String(coarse));
   a.push('-readrate', isLive ? '1.0' : '1.1');
   a.push('-i', url);

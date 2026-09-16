@@ -15,6 +15,8 @@
   var resumeSyncTimer = null;
   var AUDIO_QUEUE_SEC = 3.5;
   var PREROLL_SEC = 1.5;
+  var PLAY_HOLD_SEC = 10;
+  var PLAY_GO_SEC = 9;
   var VIDEO_CATCH_FRAMES = 2;
   var prerolling = false;
   var prerollAt = 0;
@@ -23,6 +25,7 @@
   var pauseNet0 = -1;
   var streamHeld = false;
   var needStreamRestart = false;
+  var overflowFails = 0;
   var videoFail = 0;
   var ended = false;
   var streamEnded = false;
@@ -1244,6 +1247,10 @@
     return (kb * 1000) / 8;
   }
 
+  function outHeight() {
+    return quality >= 480 ? 480 : 360;
+  }
+
   function remainSec() {
     if (isLive || !(duration > 0)) return 86400;
     var pos = (paused && pausePos >= 0) ? pausePos : currentPos();
@@ -1332,21 +1339,22 @@
     var wantHold = fill >= 0.65;
     if (paused) {
       if (ahead >= 10 || ahead >= remain - 0.2) wantHold = true;
-    } else if (ahead >= 6) {
+    } else if (ahead >= PLAY_HOLD_SEC) {
       wantHold = true;
     }
     if (wantHold) {
       sendStreamCtrl(true);
       return;
     }
-    var wantGo = fill <= 0.42;
-    if (paused) wantGo = wantGo && ahead < 8 && ahead < remain - 0.8;
-    else wantGo = wantGo && ahead <= 2.5;
-    if (wantGo) sendStreamCtrl(false);
+    if (paused) {
+      if (fill <= 0.42 && ahead < 8 && ahead < remain - 0.8) sendStreamCtrl(false);
+      return;
+    }
+    if (fill < 0.6 && ahead < PLAY_GO_SEC) sendStreamCtrl(false);
   }
 
   function shouldRestartFromSound(heard, vt) {
-    if (ended || streamEnded || nearEnd() || paused || prerolling || rebuffering || isLive || !videoStartWall) return false;
+    if (ended || streamEnded || paused || prerolling || rebuffering || isLive || !videoStartWall) return false;
     if (Date.now() - videoStartWall < 4000) return false;
     if (Date.now() - lastSyncRestart < 12000) return false;
     if (!(heard > 0) || !isFinite(vt)) return false;
@@ -1357,7 +1365,7 @@
   }
 
   function restartFromSound() {
-    if (ended || streamEnded || nearEnd() || paused || !playing || isLive || soundResyncing) return;
+    if (ended || streamEnded || paused || !playing || isLive || soundResyncing) return;
     if (Date.now() - lastSyncRestart < 12000) return;
     var src = playing;
     var sec = currentPos();
@@ -1394,9 +1402,11 @@
       var room = this.bytes.length - this.byteLength;
       if (room < buf.length) {
         sendStreamCtrl(true);
-        needStreamRestart = true;
+        overflowFails++;
+        if (overflowFails >= 3) needStreamRestart = true;
         return;
       }
+      overflowFails = 0;
       this.bytes.set(buf, this.byteLength);
       this.byteLength += buf.length;
     };
@@ -1420,12 +1430,14 @@
     if (pos > duration) pos = duration;
     seek.max = duration;
     seek.value = String(pos);
-    var ahead = packedAhead();
+    var ahead = Math.max(packedAhead(), queuedAudio());
     if (ahead > duration - pos) ahead = Math.max(0, duration - pos);
-    var end = pos + ahead;
-    bufEnd = end;
+    var liveEnd = pos + ahead;
+    if (liveEnd > bufEnd) bufEnd = liveEnd;
+    if (bufEnd < pos) bufEnd = pos;
+    if (bufEnd > duration) bufEnd = duration;
     var playPct = pos / duration;
-    var bufPct = Math.min(1, end / duration);
+    var bufPct = Math.min(1, bufEnd / duration);
     if ($('seekPlay')) $('seekPlay').style.width = (playPct * 100) + '%';
     if ($('seekBuf')) $('seekBuf').style.width = (bufPct * 100) + '%';
     if ($('seekKnob')) $('seekKnob').style.left = (playPct * 100) + '%';
@@ -1457,6 +1469,7 @@
     resumeAt = 0;
     streamHeld = false;
     needStreamRestart = false;
+    overflowFails = 0;
     videoFail = 0;
     prerolling = false;
     prerollAt = 0;
@@ -1494,7 +1507,7 @@
     }
     applyChrome();
     $('npTitle').textContent = '불러오는 중...';
-    $('npFps').textContent = quality + 'p · ' + fps + 'fps · 0 FPS';
+    $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · 0 FPS';
     stage.width = 640;
     stage.height = 360;
     videoAr = 16 / 9;
@@ -1710,7 +1723,6 @@
     useHttpAudio = false;
     videoStartWall = 0;
     unlockAudio();
-    $('npTitle').textContent = ($('npTitle').textContent || '') + ' · 버퍼링';
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     launchPlayer(wsUrlFor(src, startAt));
     if (paused) {
@@ -1966,6 +1978,10 @@
           flushPrerollAudio(this.audioOut);
           setStatus('재생');
         } else {
+          if (rebuffering && waited > 8000 && nearEnd() && supplyDrained()) {
+            finishPlayback();
+            return;
+          }
           applyStreamHold();
           return;
         }
@@ -2003,6 +2019,7 @@
     resumePending = false;
     streamHeld = false;
     needStreamRestart = false;
+    overflowFails = 0;
     videoFail = 0;
     soundResyncing = false;
     prerolling = true;
@@ -2037,7 +2054,7 @@
           fpsCount++;
           var now = Date.now();
           if (now - lastFps >= 1000) {
-            $('npFps').textContent = quality + 'p · ' + fps + 'fps · ' + fpsCount + ' FPS';
+            $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · ' + fpsCount + ' FPS';
             fpsCount = 0;
             lastFps = now;
           }
