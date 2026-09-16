@@ -15,8 +15,7 @@
   var resumeSyncTimer = null;
   var AUDIO_QUEUE_SEC = 3.5;
   var PREROLL_SEC = 1.5;
-  var PLAY_HOLD_SEC = 10;
-  var PLAY_GO_SEC = 9;
+  var bufTarget = 10;
   var VIDEO_CATCH_FRAMES = 2;
   var prerolling = false;
   var prerollAt = 0;
@@ -1338,8 +1337,8 @@
     var remain = remainSec();
     var wantHold = fill >= 0.65;
     if (paused) {
-      if (ahead >= 10 || ahead >= remain - 0.2) wantHold = true;
-    } else if (ahead >= PLAY_HOLD_SEC) {
+      if (ahead >= bufTarget || ahead >= remain - 0.2) wantHold = true;
+    } else if (ahead >= bufTarget) {
       wantHold = true;
     }
     if (wantHold) {
@@ -1347,10 +1346,10 @@
       return;
     }
     if (paused) {
-      if (fill <= 0.42 && ahead < 8 && ahead < remain - 0.8) sendStreamCtrl(false);
+      if (fill <= 0.42 && ahead < bufTarget - 2 && ahead < remain - 0.8) sendStreamCtrl(false);
       return;
     }
-    if (fill < 0.6 && ahead < PLAY_GO_SEC) sendStreamCtrl(false);
+    if (fill < 0.6 && ahead < bufTarget - 1) sendStreamCtrl(false);
   }
 
   function shouldRestartFromSound(heard, vt) {
@@ -1412,6 +1411,19 @@
     };
   }
 
+  function showSeekBuf(fromSec, aheadSec) {
+    var buf = $('seekBuf');
+    if (!buf || !duration) return;
+    fromSec = Number(fromSec) || 0;
+    aheadSec = Number(aheadSec) || 0;
+    if (fromSec < 0) fromSec = 0;
+    if (aheadSec < 0) aheadSec = 0;
+    if (fromSec > duration) fromSec = duration;
+    if (fromSec + aheadSec > duration) aheadSec = duration - fromSec;
+    buf.style.left = ((fromSec / duration) * 100) + '%';
+    buf.style.width = ((aheadSec / duration) * 100) + '%';
+  }
+
   function paintSeekBar() {
     if (seeking) return;
     var seek = $('seek');
@@ -1436,10 +1448,12 @@
     if (liveEnd > bufEnd) bufEnd = liveEnd;
     if (bufEnd < pos) bufEnd = pos;
     if (bufEnd > duration) bufEnd = duration;
+    var origin = startAt;
+    if (origin < 0) origin = 0;
+    if (origin > pos) origin = pos;
     var playPct = pos / duration;
-    var bufPct = Math.min(1, bufEnd / duration);
     if ($('seekPlay')) $('seekPlay').style.width = (playPct * 100) + '%';
-    if ($('seekBuf')) $('seekBuf').style.width = (bufPct * 100) + '%';
+    showSeekBuf(origin, bufEnd - origin);
     if ($('seekKnob')) $('seekKnob').style.left = (playPct * 100) + '%';
     var clock = fmtPlayClock(pos) + ' / ' + fmtPlayClock(duration);
     if (paused && ahead >= 0.5) clock += ' · +' + Math.round(ahead) + '초';
@@ -1476,6 +1490,7 @@
     rebuffering = false;
     ended = false;
     streamEnded = false;
+    clock0 = 0;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
@@ -1496,6 +1511,7 @@
     playing = src;
     startAt = seek || 0;
     bufEnd = startAt;
+    showSeekBuf(startAt, 0);
     if (keepPaused) {
       paused = true;
       pausePos = startAt;
@@ -1772,7 +1788,7 @@
         paintSeekBar();
         var ahead = packedAhead();
         var remain = remainSec();
-        var full = remain <= 0.5 || ahead >= 10 || ahead >= remain - 0.2 || decoderFill() >= 0.75;
+        var full = remain <= 0.5 || ahead >= bufTarget || ahead >= remain - 0.2 || decoderFill() >= 0.75;
         if (full && ahead >= 0.5) {
           setStatus('일시정지 · 미리 받기 ' + Math.round(ahead) + '초 · 대기');
         } else if (ahead >= 0.5) {
@@ -2150,6 +2166,7 @@
     seekPick = pct * duration;
     if ($('seekPlay')) $('seekPlay').style.width = (pct * 100) + '%';
     if ($('seekKnob')) $('seekKnob').style.left = (pct * 100) + '%';
+    showSeekBuf(seekPick, 0);
     if ($('seek')) $('seek').value = String(seekPick);
     if ($('npTime')) $('npTime').textContent = fmtPlayClock(seekPick) + ' / ' + fmtPlayClock(duration);
   }
@@ -2536,14 +2553,14 @@
     };
   }
 
-  function bindToggleBtns(sel, cls, apply) {
+  function bindToggleBtns(sel, cls, apply, restart) {
     var btns = document.querySelectorAll(sel);
     for (var i = 0; i < btns.length; i++) {
       btns[i].onclick = function () {
         apply(this);
         for (var j = 0; j < btns.length; j++) btns[j].className = 'ctrl ' + cls;
         this.className = 'ctrl ' + cls + ' on';
-        if (playing) playUrl(playing, currentPos());
+        if (restart !== false && playing) playUrl(playing, currentPos());
       };
     }
   }
@@ -2556,6 +2573,11 @@
   bindToggleBtns('.rbtn', 'rbtn', function (el) {
     vbrLow = el.getAttribute('data-vbr') === 'low';
   });
+  bindToggleBtns('.bbtn', 'bbtn', function (el) {
+    var n = parseInt(el.getAttribute('data-buf'), 10);
+    bufTarget = (n === 15 || n === 20 || n === 30) ? n : 10;
+    applyStreamHold();
+  }, false);
 
   function eventSubEl(from) {
     var t = from;

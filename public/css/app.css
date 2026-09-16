@@ -167,8 +167,6 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .seek-buf {
   position: absolute; left: 0; top: 0; height: 100%; width: 0;
   background: #717171;
-  -webkit-transition: width 0.35s linear;
-  transition: width 0.35s linear;
 }
 .player-box.paused .seek-buf { background: #c8c8c8; }
 .seek-play {
@@ -223,7 +221,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 }
 .ctrl.play { background: #ff0000; min-width: 92px; }
 .ctrl.fs { background: #272727; margin-right: 0; }
-.ctrl.on, .qbtn.on, .fbtn.on, .rbtn.on { background: #ff0000; }
+.ctrl.on, .qbtn.on, .fbtn.on, .rbtn.on, .bbtn.on { background: #ff0000; }
 .time { display: inline-block; color: #bbb; font-size: 0.85rem; margin: 0 4px 0 8px; line-height: 40px; vertical-align: middle; }
 .vol-wrap {
   display: inline-block; vertical-align: middle;
@@ -390,7 +388,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   border-bottom: 1px solid #272727;
 }
 .ch-row td { vertical-align: middle; padding: 8px 0 14px; }
-.ch-av-td { width: 52px; }
+.ch-av-td { width: 52px; padding-right: 12px; }
 .ch-name-td { width: 99%; }
 .ch-sub-td { width: 1%; white-space: nowrap; text-align: right; padding-left: 12px; }
 .ch-av {
