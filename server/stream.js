@@ -62,11 +62,6 @@ function killProc(p) {
 }
 
 function startYoutubePipe(info, start) {
-  var tmp = '';
-  if (info.dumpJson) {
-    tmp = path.join(os.tmpdir(), 'yt-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.json');
-    fs.writeFileSync(tmp, JSON.stringify(media.stripBrokenFormats(info.dumpJson)));
-  }
   const extra = [
     '-f', '134+140/135+140/160+139/bestvideo[height<=360]+bestaudio/bestvideo+bestaudio',
     '--merge-output-format', 'mkv',
@@ -75,25 +70,14 @@ function startYoutubePipe(info, start) {
     '-o', '-',
   ];
   const s = parseStart(start);
-  if (!info.isLive && s > 2) extra.push('--download-sections', '*' + Math.floor(s) + '-inf');
-  var dlArgs;
-  if (tmp) {
-    extra.unshift('--load-info-json', tmp);
-    dlArgs = extra.slice();
-    dlArgs.unshift(
-      '--force-ipv4',
-      '--no-warnings',
-      '--js-runtimes', 'node:' + process.execPath,
-      '--extractor-args', 'youtube:player_client=default'
-    );
-  } else {
-    extra.push(info.pageUrl || ('https://www.youtube.com/watch?v=' + (info.id || '')));
-    dlArgs = media.ytdlpArgs(extra, { client: 'default', cookies: false, ignoreErrors: false });
+  if (!info.isLive && s > 2) {
+    extra.push('--download-sections', '*' + Math.floor(s) + '-inf');
   }
+  extra.push(info.pageUrl || ('https://www.youtube.com/watch?v=' + (info.id || '')));
+  var dlArgs = media.ytdlpArgs(extra, { client: 'default', cookies: false, ignoreErrors: false });
   const ytdlp = spawn(config.YT_DLP, dlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
   swallowErr(ytdlp.stdout);
   swallowErr(ytdlp.stderr);
-  function dropTmp() { if (tmp) try { fs.unlinkSync(tmp); } catch (e) {} }
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   swallowErr(stdout);
@@ -105,7 +89,6 @@ function startYoutubePipe(info, start) {
   function finish(code) {
     if (finished) return;
     finished = true;
-    dropTmp();
     try { stdout.end(); } catch (e0) {}
     ee.emit('close', code == null ? 1 : code);
   }
@@ -566,7 +549,8 @@ function attachWsStream(ws, input, quality, start, extra) {
           cleanup();
           return;
         }
-        if (mpegSent < 8000 && encodeAttempt < 2) {
+        var sourceRejected = /403|forbidden|http error/i.test(errBuf);
+        if ((mpegSent < 8000 || sourceRejected) && encodeAttempt < 2) {
           encodeAttempt += 1;
           try { media.invalidateSource(info && info.id); } catch (eInv) {}
           sendStatus(ws, parseStart(start) > 2 ? '지정한 위치부터 다시 받는 중...' : '다시 연결하는 중...');
