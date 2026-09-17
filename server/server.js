@@ -703,12 +703,13 @@ wss.on('connection', function (ws, req, parsed) {
   const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
   const low = parsed.query.vbr === 'low';
   const refresh = parsed.query.refresh === '1';
+  const legacySeek = parsed.query.legacy === '1';
   if (!input) {
     ws.send(JSON.stringify({ type: 'error', message: 'url/channel 이 필요합니다' }));
     ws.close();
     return;
   }
-  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, refresh: refresh });
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, refresh: refresh, legacySeek: legacySeek });
 });
 
 function shutdown() {

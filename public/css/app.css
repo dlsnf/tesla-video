@@ -140,12 +140,23 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .item .d { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
 
 .player-box {
-  display: none; position: relative; background: #000;
+  display: none; position: relative; z-index: 2; background: #000;
   border-radius: 12px; overflow: hidden; margin-bottom: 12px;
   border: 0;
 }
 .player-box.on { display: block; }
+body.watch-loading { background: #000; }
+.loading-curtain {
+  display: none; position: fixed; inset: 0; z-index: 1000;
+  background: #000; pointer-events: none;
+}
+.loading-curtain.on { display: block; }
 .stage-wrap { position: relative; width: 100%; height: 0; padding-bottom: 56.25%; background: #000; }
+.stage-loading-bg {
+  display: none; position: absolute; inset: 0; z-index: 5;
+  background: #000; pointer-events: none;
+}
+.stage-loading-bg.on { display: block; }
 #stage {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
   display: block; background: #000;
@@ -165,7 +176,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .hud-title { font-size: 1.05rem; font-weight: 700; padding-right: 90px; }
 .hud-fps { position: absolute; top: 14px; right: 16px; color: #32d74b; font-size: 0.8rem; }
 .stage-status {
-  display: none; position: absolute; left: 50%; top: 50%; z-index: 7;
+  display: none; position: absolute; left: 50%; top: 50%; z-index: 12;
   max-width: calc(100% - 32px); padding: 10px 16px; transform: translate(-50%, -50%);
   color: #fff; background: rgba(0, 0, 0, .72); border-radius: 8px;
   font-size: 1rem; font-weight: 700; text-align: center; white-space: normal;
@@ -291,6 +302,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 }
 .seek { width: 100%; height: 28px; }
 .stat {
+  position: relative; z-index: 2;
   margin: 0 0 12px; color: var(--muted); font-size: 0.8rem; min-height: 1.1em;
 }
 .qbtn.on, .fbtn.on, .rbtn.on { background: var(--red); }
@@ -404,6 +416,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .watch-head .back { float: left; margin-right: 8px; }
 .watch-head h1 { display: none; }
 .watch-title {
+  position: relative; z-index: 1;
   font-size: 1.25rem;
   font-weight: 700;
   line-height: 1.4;

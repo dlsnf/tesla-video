@@ -247,16 +247,18 @@ function pickDumpFormat(dump, ids) {
 }
 
 function startYoutubeSeek(info, start) {
-  var dump = info.dumpJson ? media.stripBrokenFormats(info.dumpJson) : null;
-  var v = pickDumpFormat(dump, ['134', '135', '160', '133', '243', '244']);
-  var a = pickDumpFormat(dump, ['140', '139', '251', '250', '249']);
-  if (!v || !a || !v.url || !a.url) return null;
-  var s = String(Math.floor(start));
-  var args = ['-hide_banner', '-loglevel', 'warning', '-ss', s];
+  if (!info || !info.videoUrl || !info.audioUrl) return null;
+  var v = { url: info.videoUrl, http_headers: info.videoHeaders };
+  var a = { url: info.audioUrl, http_headers: info.audioHeaders };
+  var target = parseStart(start);
+  var coarse = Math.max(0, target - 2);
+  var fine = target - coarse;
+  var args = ['-hide_banner', '-loglevel', 'warning', '-ss', String(coarse)];
   Array.prototype.push.apply(args, netInput(v.url, 0, false, v.http_headers, { noRate: true }));
-  args.push('-ss', s);
+  args.push('-ss', String(coarse));
   Array.prototype.push.apply(args, netInput(a.url, 0, false, a.http_headers, { noRate: true }));
   args.push('-map', '0:v:0', '-map', '1:a:0');
+  if (fine > 0) args.push('-ss', String(fine));
   Array.prototype.push.apply(args, encodeTs(info));
   return spawnFfmpeg(args);
 }
@@ -314,7 +316,8 @@ function startTestAudio() {
   ]);
 }
 
-function startVideo(info, start) {
+function startVideo(info, start, opts) {
+  opts = opts || {};
   if (info.type === 'test') return startTestVideo(info);
   if (info.type === 'youtube') return startYoutubePipe(info, start);
   const sk = seekParts(start, info.isLive);
@@ -382,6 +385,7 @@ function attachWsStream(ws, input, quality, start, extra) {
   let flushTimer = null;
   let heartbeatTimer = null;
   let clientHold = false;
+  let legacySeek = !!(extra && extra.legacySeek);
   let flushWs = function () {};
   const slot = { kind: 'video', kill: function () { killProc(ffmpeg); } };
   active.add(slot);
@@ -442,7 +446,7 @@ function attachWsStream(ws, input, quality, start, extra) {
     info.fps = extra && extra.fps === 30 ? 30 : 24;
     info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
     var encodeAttempt = 0;
-    ffmpeg = startVideo(info, start);
+    ffmpeg = startVideo(info, start, { legacySeek: legacySeek });
     slot.kill = function () { killProc(ffmpeg); };
 
     var pending = [];
@@ -505,6 +509,7 @@ function attachWsStream(ws, input, quality, start, extra) {
 
     function bindMpeg(cur) {
       if (!cur) return;
+      var lastEncodedSec = 0;
       swallowErr(cur.stdout);
       swallowErr(cur.stderr);
       if (cur.stdin) swallowErr(cur.stdin);
@@ -516,7 +521,16 @@ function attachWsStream(ws, input, quality, start, extra) {
         if (pendingBytes >= 32 * 1024) flushWs();
       });
       cur.stderr.on('data', function (d) {
-        errBuf += d.toString();
+        var text = d.toString();
+        var tm = text.match(/time=([0-9:.]+)/g);
+        if (tm && tm.length) {
+          var raw = tm[tm.length - 1].replace(/^time=/, '').split(':');
+          if (raw.length === 3) {
+            var parsed = (parseFloat(raw[0]) * 3600) + (parseFloat(raw[1]) * 60) + parseFloat(raw[2]);
+            if (isFinite(parsed)) lastEncodedSec = parsed;
+          }
+        }
+        errBuf += text;
         if (errBuf.length > 1200) errBuf = errBuf.slice(-600);
       });
       if (cur._buddy && cur._buddy.stderr) {
@@ -565,7 +579,7 @@ function attachWsStream(ws, input, quality, start, extra) {
             errBuf = '';
             pending = [];
             pendingBytes = 0;
-            ffmpeg = startVideo(info, start);
+            ffmpeg = startVideo(info, start, { legacySeek: legacySeek });
             slot.kill = function () { if (flushTimer) clearInterval(flushTimer); killProc(ffmpeg); };
             bindMpeg(ffmpeg);
           }).catch(function (e) {
@@ -577,11 +591,31 @@ function attachWsStream(ws, input, quality, start, extra) {
         }
         if (mpegSent < 8000) {
           sendJson(ws, { type: 'error', message: '지정한 위치의 영상을 받지 못했습니다' });
-        } else if (!code) {
-          closeAfterDrain({ type: 'ended' });
-          return;
-        }
-        else {
+        } else {
+          var expectedSec = Math.max(0, (info.duration || 0) - parseStart(start));
+          var shortOutput = !code && !legacySeek && expectedSec > 15
+            && (!lastEncodedSec || lastEncodedSec < expectedSec - 4);
+          if (parseStart(start) > 2) {
+            sendJson(ws, {
+              type: 'seek-debug',
+              start: parseStart(start),
+              expected: expectedSec,
+              encoded: lastEncodedSec,
+              code: code == null ? null : code,
+              legacy: legacySeek,
+              short: shortOutput,
+            });
+          }
+          if (shortOutput && encodeAttempt < 2) {
+            encodeAttempt += 1;
+            sendStatus(ws, '시크 구간을 다시 준비하는 중...');
+            closeAfterDrain({ type: 'seek-retry', mode: 'legacy' });
+            return;
+          }
+          if (!code) {
+            closeAfterDrain({ type: 'ended' });
+            return;
+          }
           var msg = '스트림 종료 (' + code + ')';
           if (errBuf) {
             var flat = errBuf.replace(/\s+/g, ' ');
