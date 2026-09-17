@@ -59,6 +59,8 @@
   var pipeTok = 0;
   var lastSyncRestart = 0;
   var lastDeadVideoRestart = 0;
+  var driftSince = 0;
+  var driftAlerted = false;
   var videoCatching = false;
   var useHttpAudio = false, videoStartWall = 0;
   var fsOn = false, tapHide = null, fsControlsTimer = null;
@@ -1241,6 +1243,23 @@
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
     if (!isFinite(vt)) return;
+    var drift = Math.abs(vt - heard);
+    if (Date.now() - videoStartWall > 5000 && drift > 0.5) {
+      if (!driftSince) driftSince = Date.now();
+      if (!driftAlerted && Date.now() - driftSince >= 1200) {
+        driftAlerted = true;
+        try {
+          console.warn('[tesla-video sync] A/V drift detected', {
+            startAt: startAt,
+            videoTime: vt,
+            audioTime: heard,
+            drift: vt - heard,
+          });
+        } catch (eWarn) {}
+      }
+    } else if (drift < 0.25) {
+      driftSince = 0;
+    }
     if (vt > heard + 0.04) {
       if (videoCatching) videoCatching = false;
       return;
@@ -1450,6 +1469,8 @@
     prerolling = false;
     rebuffering = false;
     needStreamRestart = false;
+    driftSince = 0;
+    driftAlerted = false;
     videoCatching = false;
     paused = true;
     pausePos = duration > 0 ? duration : currentPos();
@@ -1981,6 +2002,8 @@
   function startPipes(src) {
     useHttpAudio = false;
     videoStartWall = 0;
+    driftSince = 0;
+    driftAlerted = false;
     unlockAudio();
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     launchPlayer(wsUrlFor(src, startAt, startAt > 2));
