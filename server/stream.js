@@ -117,7 +117,8 @@ function startYoutubePipe(info, start) {
       '-hide_banner', '-loglevel', 'warning',
       '-probesize', '512k',
       '-analyzeduration', '2M',
-      '-fflags', '+genpts',
+      '-fflags', '+genpts+discardcorrupt',
+      '-err_detect', 'ignore_err',
       '-i', 'pipe:0',
     ];
     Array.prototype.push.apply(ffArgs, encodeTs(info));
@@ -317,7 +318,7 @@ function startVideo(info, start) {
   if (info.type === 'test') return startTestVideo(info);
   if (info.type === 'youtube') return startYoutubePipe(info, start);
   const sk = seekParts(start, info.isLive);
-  const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
+  const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err'];
   if (info.audioUrl && info.audioUrl !== info.videoUrl) {
     Array.prototype.push.apply(args, netInput(info.videoUrl, sk.coarse, info.isLive, info.videoHeaders));
     Array.prototype.push.apply(args, netInput(info.audioUrl, sk.coarse, info.isLive, info.audioHeaders));

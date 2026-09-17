@@ -31,10 +31,34 @@
       }
     } catch (e3) {}
   }
+  function getDebug() {
+    var q = /(?:^|[?&])debug=([^&]*)/.exec(String(w.location.search || ''));
+    if (!q || q[1] === undefined) return false;
+    var value = decodeURIComponent(q[1] || '');
+    try { localStorage.setItem('tv_debug', value); } catch (e2) {}
+    try { sessionStorage.setItem('tv_debug', value); } catch (e3) {}
+    return value === '1' || value === 'true' || value === 'on';
+  }
+  function setDebug(on) {
+    var v = !!on ? '1' : '';
+    try { if (v) localStorage.setItem('tv_debug', v); else localStorage.removeItem('tv_debug'); } catch (e) {}
+    try { if (v) sessionStorage.setItem('tv_debug', v); else sessionStorage.removeItem('tv_debug'); } catch (e2) {}
+    try {
+      if (w.history && w.history.replaceState && !!on && String(w.location.search || '').indexOf('debug=') < 0) {
+        var href = String(w.location.href || '');
+        w.history.replaceState(null, '', href + (href.indexOf('?') >= 0 ? '&' : '?') + 'debug=1');
+      }
+    } catch (e3) {}
+  }
+  function withDebug(u) {
+    if (!getDebug()) return u;
+    return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
+  }
   function withToken(u) {
     var token = getToken();
-    if (!token) return u;
-    return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+    if (!token) return withDebug(u);
+    u = u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+    return withDebug(u);
   }
   function url(p) { return withToken(base() + p); }
   function ws(p) {
@@ -107,16 +131,22 @@
 
   function stampLinks() {
     var token = getToken();
-    if (!token) return;
+    var debug = getDebug();
     var as = document.getElementsByTagName('a');
     var i;
     for (i = 0; i < as.length; i++) {
       var href = as[i].getAttribute('href');
       if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) continue;
       if (href.indexOf('mailto:') === 0) continue;
-      if (href.indexOf('token=') >= 0) continue;
+      var next = href;
+      if (token && next.indexOf('token=') < 0) {
+        next += (next.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+      }
+      if (debug && next.indexOf('debug=') < 0) {
+        next += (next.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
+      }
+      if (next !== href) as[i].href = next;
       if (/^https?:/i.test(href) && href.indexOf(w.location.host) < 0) continue;
-      as[i].href = href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
     }
   }
 
@@ -183,5 +213,13 @@
     });
   }
 
-  w.tv = { url: url, ws: ws, get: get, post: post, fmtDur: fmtDur, fmtViews: fmtViews, fmtAgo: fmtAgo, home: home, ensurePin: ensurePin, logout: logout, stampLinks: stampLinks, getToken: getToken, setToken: setToken };
+  if (String(w.location.search || '').indexOf('debug=') >= 0) {
+    var debugParam = /(?:^|[?&])debug=([^&]*)/.exec(String(w.location.search || ''));
+    if (debugParam) {
+      try { localStorage.setItem('tv_debug', decodeURIComponent(debugParam[1] || '')); } catch (e) {}
+      try { sessionStorage.setItem('tv_debug', decodeURIComponent(debugParam[1] || '')); } catch (e2) {}
+    }
+  }
+
+  w.tv = { url: url, ws: ws, get: get, post: post, fmtDur: fmtDur, fmtViews: fmtViews, fmtAgo: fmtAgo, home: home, ensurePin: ensurePin, logout: logout, stampLinks: stampLinks, getToken: getToken, setToken: setToken, getDebug: getDebug, setDebug: setDebug, withDebug: withDebug };
 })(window);

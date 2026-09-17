@@ -1105,6 +1105,24 @@
     return heard > 0 && isFinite(vt) && vt >= heard - 0.025 && vt <= heard + 0.04;
   }
 
+  function restartDeadVideoStream(reason, extra) {
+    if (ended || streamEnded || paused || prerolling || !playing || !player) return;
+    if (Date.now() - lastDeadVideoRestart < 15000) return;
+    var sec = Math.max(0, (currentPos() || 0) - 0.5);
+    lastDeadVideoRestart = Date.now();
+    debugPlayback(reason || 'restart-dead-video', Object.assign({
+      position: sec,
+      videoTime: player && player.video ? player.video.currentTime : -1,
+      heard: playingSoundTime({ fallback: false }),
+      lastVideoDecodeMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : -1,
+      queuedAudio: queuedAudio(),
+      packedAhead: packedAhead(),
+      audioAhead: audioAheadSec(),
+      videoAhead: videoAheadSec()
+    }, extra || {}));
+    playUrl(playing, sec, { skipInfo: true });
+  }
+
   function markCaughtUp() {
     if (resumePending && !liveClockReady()) return;
     videoCatching = false;
@@ -1960,6 +1978,16 @@
       if (!prerolling && shouldRebuffer()) {
         beginRebuffer();
       }
+      if (!lastVideoDecodeAt && Date.now() - prerollAt > 8000 && netBytes > 4000) {
+        restartDeadVideoStream('restart-no-video-first-frame');
+        return;
+      }
+      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000) {
+        restartDeadVideoStream('restart-video-stalled', {
+          stalledMs: Date.now() - lastVideoDecodeAt
+        });
+        return;
+      }
       if (prerolling) {
         var need = isLive ? 0.8 : PREROLL_SEC;
         var n = 0;
@@ -2039,7 +2067,7 @@
         videoBufferSize: 4 * 1024 * 1024,
         maxAudioLag: 4.5,
         disableWebAssembly: true,
-        decodeFirstFrame: false,
+        decodeFirstFrame: true,
         pauseWhenHidden: false,
         preserveDrawingBuffer: false,
         disableWebAudio: false,
