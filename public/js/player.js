@@ -1690,6 +1690,7 @@
     stageFrameReady = false;
     stagePrerollReady = false;
     updateStageLoader('');
+    if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     clock0 = 0;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
@@ -1716,6 +1717,12 @@
     frame.className = 'stage-frame on';
   }
 
+  function revealPlayback() {
+    if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg';
+    if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
+    document.body.classList.remove('watch-loading');
+  }
+
   function sameWatch(src) {
     if (!src) return false;
     if (playing && playing === src) return true;
@@ -1728,7 +1735,9 @@
     var playSeq = beginReq();
     var keepPaused = !!(opts && opts.keepPaused);
     var skipInfo = !!(opts && opts.skipInfo) && duration > 0 && sameWatch(src);
-    preservedStageFrame = captureStageFrame();
+    preservedStageFrame = '';
+    if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg on';
+    if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain on';
     wakeAudio();
     stop(true);
     playing = src;
@@ -1773,6 +1782,7 @@
         return;
       }
       if (!info || !info.ok) {
+        if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
         soundResyncing = false;
         setStatus((info && info.error) || '영상을 열 수 없습니다. 다른 영상을 선택해 보세요.');
         if ($('npTitle')) $('npTitle').textContent = '재생할 수 없음';
@@ -1869,8 +1879,8 @@
     });
   }
 
-  function wsUrlFor(src, start, refresh) {
-    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : ''));
+  function wsUrlFor(src, start, refresh, legacy) {
+    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : ''));
   }
 
   function startHttpAudio(src) {
@@ -2158,6 +2168,7 @@
 
   function failPreroll(msg) {
     if (!prerolling) return;
+    if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     var failedMessage = msg || lastStreamErr;
     prerolling = false;
     if (prerollTimer) { clearTimeout(prerollTimer); prerollTimer = null; }
@@ -2415,6 +2426,9 @@
         onVideoDecode: function () {
           var frame = $('stageFrame');
           if (frame) frame.className = 'stage-frame';
+          var loadingBg = $('stageLoadingBg');
+          if (loadingBg) loadingBg.className = 'stage-loading-bg';
+          if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
           preservedStageFrame = '';
           lastVideoDecodeAt = Date.now();
           if (!videoStartWall) {
@@ -2476,6 +2490,17 @@
       if (ev && typeof ev.data === 'string') {
         try {
           var msg = JSON.parse(ev.data);
+          if (msg && msg.type === 'seek-debug' && playbackDebug) {
+            debugPlayback('seek-stream-closed', msg);
+          }
+          if (msg && msg.type === 'seek-retry') {
+            setStatus('시크 구간을 다시 준비하는 중...');
+            setTimeout(function () {
+              if (gen !== streamGen || !playing || ended) return;
+              launchPlayer(wsUrlFor(playing, startAt, false, msg.mode === 'legacy'));
+            }, 40);
+            return;
+          }
           if (msg && msg.type === 'ended') markStreamEnded();
           if (msg && (msg.type === 'error' || msg.type === 'status') && msg.message) {
             var sm = String(msg.message).replace(/\s+/g, ' ').trim();

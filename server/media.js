@@ -22,7 +22,7 @@ setInterval(function () {
 }, 60 * 1000).unref();
 
 function isBotBlock(err) {
-  return /봇이 아님|not a bot|Sign in to confirm|페이지를 새로고침해야|page needs to be reloaded|Requested format is not available|사용 가능한 형식/i.test(String((err && err.message) || err || ''));
+  return /봇이 아님|not a bot|Sign in to confirm|페이지를 새로고침해야|page needs to be reloaded|Requested format is not available|사용 가능한 형식|HTTP error 403 Forbidden|403 Forbidden/i.test(String((err && err.message) || err || ''));
 }
 
 function botHint() {
@@ -227,6 +227,19 @@ function formatForQuality(quality) {
   ].join('/');
 }
 
+function youtubeFormatCandidatesForQuality(quality) {
+  const h = heightForQuality(quality);
+  return [
+    'bestvideo[height<=' + h + ']+bestaudio',
+    'bv*[height<=' + h + '][format_id!=18]+ba',
+    'best[format_id!=18]',
+    'bestvideo+bestaudio',
+    '134+140',
+    '135+140',
+    '160+139',
+  ];
+}
+
 function even(n) {
   n = Math.max(2, Math.round(n));
   if (n % 2) n += 1;
@@ -315,17 +328,31 @@ async function resolveSource(input, quality) {
   const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s';
   let dumpJson = null;
   let dump = null;
-  try {
-    const result = await ytdlpRun(['-J', classified.pageUrl], { timeout: 40000 });
-    dumpJson = stripBrokenFormats(parseJsonBlob(result.stdout));
-    dump = pickDumpUrls(dumpJson);
-  } catch (e) {
+  const candidateFormats = youtubeFormatCandidatesForQuality(q);
+  let lastMetaError = null;
+  for (let i = 0; i < candidateFormats.length; i++) {
     try {
-      const result2 = await ytdlpRun(['-f', 'bestvideo+bestaudio/best[format_id!=18]', '-J', classified.pageUrl], { timeout: 40000 });
-      dumpJson = stripBrokenFormats(parseJsonBlob(result2.stdout));
+      const result = await ytdlpRun(
+        i === 0 ? ['-J', classified.pageUrl] : ['-f', candidateFormats[i], '-J', classified.pageUrl],
+        { timeout: 40000 }
+      );
+      dumpJson = stripBrokenFormats(parseJsonBlob(result.stdout));
       dump = pickDumpUrls(dumpJson);
-    } catch (e2) {
-      dump = null;
+      if (dump && dump.video && dump.video.url) break;
+      lastMetaError = new Error('no stream url');
+    } catch (e) {
+      lastMetaError = e;
+      if (!isBotBlock(e)) {
+        if (i === candidateFormats.length - 1) break;
+        continue;
+      }
+      if (i === candidateFormats.length - 1) break;
+    }
+  }
+  if (!dump || !dump.video || !dump.video.url) {
+    dump = null;
+    if (lastMetaError && !isBotBlock(lastMetaError)) {
+      throw lastMetaError;
     }
   }
 
@@ -364,11 +391,22 @@ async function resolveSource(input, quality) {
   } else {
     let result;
     const grab = ['--print', printFmt, '-g', classified.pageUrl];
-    try {
-      result = await ytdlpRun(['-f', format].concat(grab), { timeout: 40000 });
-    } catch (e) {
-      result = await ytdlpRun(['-f', 'bv*+ba/b/best'].concat(grab), { timeout: 40000 });
+    const formatCandidates = [format].concat(youtubeFormatCandidatesForQuality(q));
+    let lastErr = null;
+    for (let i = 0; i < formatCandidates.length; i++) {
+      const candidate = formatCandidates[i];
+      try {
+        result = await ytdlpRun(['-f', candidate].concat(grab), { timeout: 40000 });
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (!isBotBlock(e)) {
+          if (i === formatCandidates.length - 1) throw e;
+          continue;
+        }
+      }
     }
+    if (!result) throw lastErr || new Error('스트림 URL이 없습니다 (비공개/지역제한/오프라인일 수 있음)');
     const lines = result.stdout.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
     const metaLine = lines.find(function (l) { return l.indexOf('|||') !== -1; }) || '';
     const urls = lines.filter(function (l) { return /^https?:\/\//i.test(l); });
@@ -1435,5 +1473,6 @@ module.exports = {
   twitchStatus,
   ytdlpArgs,
   formatForQuality,
+  youtubeFormatCandidatesForQuality,
   stripBrokenFormats,
 };

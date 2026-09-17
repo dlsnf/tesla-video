@@ -140,7 +140,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .item .d { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
 
 .player-box {
-  display: none; position: relative; background: #000;
+  display: none; position: relative; z-index: 2; background: #000;
   border-radius: 12px; overflow: hidden; margin-bottom: 12px;
   border: 0;
 }
@@ -251,6 +251,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 }
 .seek { width: 100%; height: 28px; }
 .stat {
+  position: relative; z-index: 2;
   margin: 0 0 12px; color: var(--muted); font-size: 0.8rem; min-height: 1.1em;
 }
 .qbtn.on, .fbtn.on, .rbtn.on { background: var(--red); }
@@ -364,6 +365,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .watch-head .back { float: left; margin-right: 8px; }
 .watch-head h1 { display: none; }
 .watch-title {
+  position: relative; z-index: 1;
   font-size: 1.25rem;
   font-weight: 700;
   line-height: 1.4;

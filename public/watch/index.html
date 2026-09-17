@@ -6,9 +6,10 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=133">
+<link rel="stylesheet" href="../css/app.css?v=136">
 </head>
-<body>
+<body class="watch-loading">
+<div id="loadingCurtain" class="loading-curtain on" aria-hidden="true"></div>
 <div class="wrap" id="page">
   <div class="yt-top">
     <div class="yt-top-right">
@@ -32,8 +33,9 @@
   </div>
 
   <div id="playerBox" class="player-box">
-    <div class="stage-wrap">
-      <canvas id="stage"></canvas>
+    <div class="stage-wrap" style="background:#000">
+      <canvas id="stage" style="background:#000"></canvas>
+      <div class="stage-loading-bg on" id="stageLoadingBg" aria-hidden="true"></div>
       <img class="stage-frame" id="stageFrame" alt="">
       <div class="tap-layer" id="tapLayer"></div>
       <div class="tap-icon" id="tapIcon">▶</div>
@@ -109,6 +111,7 @@
   </div>
   <audio id="na" autoplay playsinline></audio>
 
+  <div class="stat" id="st">영상을 불러오는 중...</div>
   <h1 class="watch-title" id="watchH">재생</h1>
   <table class="ch-row" id="chRow" style="display:none">
     <tr>
@@ -118,7 +121,6 @@
     </tr>
   </table>
 
-  <div class="stat" id="st">영상을 불러오는 중...</div>
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
   <div class="chips" id="chips">
     <button class="chip on" data-feed="related" type="button">관련 동영상</button>
@@ -174,6 +176,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=133"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-<script src="../js/player.js?v=133"></script>
+  <script src="../js/player.js?v=142"></script>
 </body>
 </html>
