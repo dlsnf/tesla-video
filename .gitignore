@@ -13,6 +13,7 @@ data/**/*.json
 
 # deps and junk
 node_modules/
+.vscode/
 *.log
 .DS_Store
 

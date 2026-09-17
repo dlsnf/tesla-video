@@ -1,0 +1,17 @@
+services:
+  tesla-video:
+    build: .
+    container_name: tesla-video
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8742:8742"
+    volumes:
+      - ./data:/app/data
+      - ./server:/app/server
+      - ./public:/app/public
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    working_dir: /app

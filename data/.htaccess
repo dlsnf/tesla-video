@@ -1,0 +1,4 @@
+# the-server.example.com 의 DocumentRoot 가 /var/www/html 이라
+# /tv 폴더가 정적 파일로 열리지 않게 막습니다.
+# example.com/tv/ 는 httpd.conf 의 ProxyPass 가 처리합니다.
+Require all denied

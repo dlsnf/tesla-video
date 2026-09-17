@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ffmpeg \
+    procps \
     python3 \
     python3-pip \
     ca-certificates \
