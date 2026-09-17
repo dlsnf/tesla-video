@@ -34,11 +34,17 @@
   <div id="playerBox" class="player-box">
     <div class="stage-wrap">
       <canvas id="stage"></canvas>
+      <img class="stage-frame" id="stageFrame" alt="">
       <div class="tap-layer" id="tapLayer"></div>
       <div class="tap-icon" id="tapIcon">▶</div>
       <div class="hud-top">
         <div class="hud-title" id="npTitle">불러오는 중...</div>
         <div class="hud-fps" id="npFps">0 FPS</div>
+      </div>
+      <div class="stage-status" id="stageStatus" aria-live="polite"></div>
+      <div class="stage-loader" id="stageLoader" aria-hidden="true"><span></span></div>
+      <div class="stage-repeat" id="stageRepeat" aria-live="polite" aria-label="반복 재생 대기">
+        <span class="stage-repeat-icon" aria-hidden="true"></span><strong id="stageRepeatCount">3</strong>
       </div>
     </div>
     <div class="bar-bottom">

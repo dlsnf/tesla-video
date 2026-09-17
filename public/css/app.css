@@ -150,6 +150,12 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
   display: block; background: #000;
 }
+.stage-frame {
+  display: none; position: absolute; left: 0; top: 0; z-index: 2;
+  width: 100%; height: 100%; object-fit: contain; background: #000;
+  pointer-events: none;
+}
+.stage-frame.on { display: block; }
 .hud-top {
   position: absolute; top: 0; left: 0; right: 0;
   padding: 14px 16px 28px;
@@ -158,6 +164,42 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 }
 .hud-title { font-size: 1.05rem; font-weight: 700; padding-right: 90px; }
 .hud-fps { position: absolute; top: 14px; right: 16px; color: #32d74b; font-size: 0.8rem; }
+.stage-status {
+  display: none; position: absolute; left: 50%; top: 50%; z-index: 7;
+  max-width: calc(100% - 32px); padding: 10px 16px; transform: translate(-50%, -50%);
+  color: #fff; background: rgba(0, 0, 0, .72); border-radius: 8px;
+  font-size: 1rem; font-weight: 700; text-align: center; white-space: normal;
+  pointer-events: none;
+}
+.stage-status.on { display: block; }
+.stage-loader {
+  display: none; position: absolute; left: 50%; top: 50%; z-index: 7;
+  width: 34px; height: 34px; transform: translate(-50%, -50%);
+  border: 3px solid rgba(255, 255, 255, .35); border-top-color: #fff;
+  border-radius: 50%; pointer-events: none;
+}
+.stage-loader.on { display: block; animation: stage-spin .8s linear infinite; }
+.stage-loader span { display: block; width: 100%; height: 100%; }
+@keyframes stage-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+.stage-repeat {
+  display: none; position: absolute; left: 50%; top: 50%; z-index: 7;
+  width: 34px; height: 34px; transform: translate(-50%, -50%);
+  align-items: center; justify-content: center; color: #fff; pointer-events: none;
+}
+.stage-repeat.on { display: flex; }
+.stage-repeat-icon {
+  display: block; width: 34px; height: 34px;
+  border: 3px solid rgba(255, 255, 255, .35); border-top-color: #fff;
+  border-radius: 50%; animation: repeat-spin .8s linear infinite;
+}
+.stage-repeat strong {
+  position: absolute; left: 50%; top: 50%; z-index: 2;
+  transform: translate(-50%, -50%); font-size: 1.15rem; line-height: 1;
+}
+@keyframes repeat-spin { to { transform: rotate(360deg); } }
 .bar-bottom { background: #0f0f0f; padding: 2px 12px 12px; }
 .seek-wrap { position: relative; height: 28px; margin: 4px 0 2px; cursor: pointer; z-index: 6; }
 .seek-track {
@@ -548,16 +590,22 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .watch-search { overflow: hidden; margin: 0 0 10px; max-width: 640px; }
 .player-box.fs .hud-top,
 .player-box.fs .bar-bottom {
-  display: none;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .25s ease, visibility 0s linear .25s;
 }
-.player-box.fs.paused .hud-top {
-  display: block;
-  background: linear-gradient(rgba(0,0,0,.5), rgba(0,0,0,0));
-}
-.player-box.fs.paused .bar-bottom {
-  display: block;
+.player-box.fs .bar-bottom {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 8;
   background: rgba(0,0,0,.4);
+}
+.player-box.fs.controls-visible .hud-top,
+.player-box.fs.controls-visible .bar-bottom,
+.player-box.fs.paused .hud-top,
+.player-box.fs.paused .bar-bottom {
+  opacity: 1; visibility: visible; pointer-events: auto;
+  transition: opacity .25s ease, visibility 0s linear 0s;
+}
+.player-box.fs.paused .hud-top {
+  background: linear-gradient(rgba(0,0,0,.5), rgba(0,0,0,0));
 }
 body.player-fs { overflow: hidden; }
 body.player-fs .yt-head, body.player-fs .yt-top, body.player-fs .chips, body.player-fs .yt-grid, body.player-fs .stat,
