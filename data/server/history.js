@@ -39,11 +39,6 @@ function record(pin, body) {
   list.unshift({
     id: id,
     channel_id: channel_id,
-    title: String((body && body.title) || '').slice(0, 200),
-    url: String((body && body.url) || '').slice(0, 400),
-    thumbnail: String((body && body.thumbnail) || '').slice(0, 400),
-    duration: parseInt((body && body.duration), 10) || 0,
-    uploader: String((body && body.uploader) || '').slice(0, 120),
     ts: Date.now(),
   });
   write(pin, list);

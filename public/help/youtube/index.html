@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>유튜브 봇 확인 조치</title>
+<link rel="stylesheet" href="../../css/app.css?v=114">
+</head>
+<body>
+<div class="wrap">
+  <div class="brand" style="margin-bottom:16px">
+    <div class="logo"><svg viewBox="0 0 24 24"><polygon points="8,5 19,12 8,19"/></svg></div>
+    <div>
+      <h1>유튜브가 봇으로 볼 때</h1>
+      <div class="sub">차 화면에서 읽고, 실제 저장은 맥 크롬에서 합니다</div>
+    </div>
+  </div>
+
+  <div class="help-box">
+    <p class="help-lead">「봇이 아님을 확인하세요」나 「페이지를 새로고침해야 합니다」는 차가 아니라 <b>서버가 유튜브에서 영상을 받아올 때</b> 막힌 것입니다. 테슬라에 유튜브를 로그인해도 해결되지 않습니다.</p>
+  </div>
+
+  <ol class="help-steps">
+    <li>
+      <div class="help-n">1</div>
+      <div>
+        <h2>맥에서 크롬을 엽니다</h2>
+        <p>폰이나 테슬라가 아니라 <b>맥(또는 PC) 크롬</b>이어야 합니다. 테슬라에는 확장 프로그램이 없습니다.</p>
+      </div>
+    </li>
+    <li>
+      <div class="help-n">2</div>
+      <div>
+        <h2>시크릿 창에서 youtube.com 로그인</h2>
+        <p>크롬에서 <b>시크릿 창을 새로 열고</b> youtube.com 에 로그인합니다. 평소 쓰던 창에서 내보내면, 유튜브가 쿠키를 바로 바꿔서 「페이지를 새로고침해야 합니다」가 나옵니다.</p>
+      </div>
+    </li>
+    <li>
+      <div class="help-n">3</div>
+      <div>
+        <h2>확장 설치</h2>
+        <p>크롬 웹스토어에서 <b>Get cookies.txt LOCALLY</b> 를 설치합니다. 다른 쿠키 확장도 Netscape 형식을 내보내면 됩니다.</p>
+      </div>
+    </li>
+    <li>
+      <div class="help-n">4</div>
+      <div>
+        <h2>쿠키 복사 후 시크릿 창을 닫기</h2>
+        <p>그 시크릿 탭에서 확장 아이콘 → Export → <b>Netscape</b> 형식을 복사합니다. 맨 위가 <code># Netscape HTTP Cookie File</code> 이고 <code>youtube.com</code> 이 들어 있어야 합니다. 복사한 뒤 <b>시크릿 창을 바로 닫으세요.</b> 그 창을 열어 두면 쿠키가 다시 바뀝니다.</p>
+      </div>
+    </li>
+    <li>
+      <div class="help-n">5</div>
+      <div>
+        <h2>맥 크롬에서 연결 페이지 열기</h2>
+        <p>아래 버튼을 누르거나, 주소창에 사이트 주소 뒤 <b>/tv/connect/</b> 를 붙여 엽니다. PIN 입력 후 복사한 텍스트를 붙여 넣고 <b>저장하고 연결</b>을 누릅니다.</p>
+        <p class="help-note">이 단계는 테슬라가 아니라 맥에서 해야 붙여넣기가 됩니다.</p>
+        <a class="btn btn-red" id="goConnect" href="../connect/">쿠키 저장 페이지 열기</a>
+      </div>
+    </li>
+    <li>
+      <div class="help-n">6</div>
+      <div>
+        <h2>차에서 다시 재생</h2>
+        <p>저장이 끝나면 차 브라우저를 새로고침한 뒤 같은 영상을 다시 엽니다. 그래도 안 되면 서버에서 <code>docker compose up -d --build</code> 한 다음 다시 시도합니다.</p>
+      </div>
+    </li>
+  </ol>
+
+  <div class="help-box">
+    <h2>안 될 때</h2>
+    <ul>
+      <li>「페이지를 새로고침해야 합니다」는 평소 크롬 창에서 내보낸 쿠키가 이미 바뀐 경우가 많습니다. 시크릿 창에서 다시 내보낸 뒤 그 창을 닫고 저장하세요.</li>
+      <li>쿠키를 넣었는데도 같으면, 낡은 쿠키가 오히려 방해일 수 있습니다. 서버 <code>data/youtube-cookies.txt</code> 를 지우고 <code>docker compose up -d --build</code> 한 다음, 쿠키 없이 다시 재생해 보세요.</li>
+      <li>쿠키를 저장한 뒤 유튜브에서 로그아웃하면 다시 막힙니다. 다시 2~5단계를 하세요.</li>
+      <li>FTP로 <code>data/</code> 폴더를 통째로 올리면 쿠키 파일이 지워집니다. <code>data/</code> 는 올리지 마세요.</li>
+      <li>유튜브가 정책을 바꾸면 같은 안내가 또 나올 수 있습니다. 그때는 쿠키를 다시 넣으면 됩니다.</li>
+    </ul>
+  </div>
+
+  <div class="row" style="margin-top:20px">
+    <a class="btn btn-gray" id="goBack" href="../player/">플레이어로</a>
+  </div>
+</div>
+<div id="pinMask" class="pin-mask">
+  <div class="pin-box">
+    <h2>접속 PIN</h2>
+    <div class="pin-dots" id="pinDots">PIN</div>
+    <div id="pinErr" class="fail" style="min-height:24px;margin-top:6px;"></div>
+    <div class="pin-grid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="c">C</button><button data-k="0">0</button><button data-k="x">←</button>
+    </div>
+  </div>
+</div>
+<script src="../../config.js?v=114"></script>
+<script src="../../js/common.js?v=114"></script>
+<script>
+tv.ensurePin(function () {
+  var c = document.getElementById('goConnect');
+  var b = document.getElementById('goBack');
+  if (c) c.href = tv.url('/connect/');
+  if (b) b.href = tv.url('/player/');
+});
+</script>
+</body>
+</html>

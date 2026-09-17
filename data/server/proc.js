@@ -53,14 +53,10 @@ function run(cmd, args, opts) {
 
 function killTree(child) {
   if (!child || !child.pid) return;
-  var pid = child.pid;
-  try {
-    var killer = spawn('pkill', ['-9', '-P', String(pid)], { stdio: 'ignore' });
-    killer.on('error', function () {});
-    if (killer.unref) killer.unref();
-  } catch (e0) {}
-  try { child.kill('SIGKILL'); } catch (e1) {}
-  try { process.kill(pid, 'SIGKILL'); } catch (e2) {}
+  try { child.kill('SIGTERM'); } catch (e) {}
+  setTimeout(function () {
+    try { child.kill('SIGKILL'); } catch (e) {}
+  }, 800);
 }
 
 module.exports = { run, killTree };

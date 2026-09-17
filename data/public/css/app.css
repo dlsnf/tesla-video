@@ -167,6 +167,8 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .seek-buf {
   position: absolute; left: 0; top: 0; height: 100%; width: 0;
   background: #717171;
+  -webkit-transition: width 0.35s linear;
+  transition: width 0.35s linear;
 }
 .player-box.paused .seek-buf { background: #c8c8c8; }
 .seek-play {
@@ -215,8 +217,8 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .bar-seg .ctrl { margin: 0 0 0 4px; height: 36px; line-height: 36px; padding: 0 12px; }
 .bar-seg .ctrl:first-child { margin-left: 0; }
 .ctrl {
-  display: inline-block; height: 44px; line-height: 44px; padding: 0 16px; margin: 0 6px 0 0;
-  border: 0; border-radius: 10px; background: #2a2a2e; color: #fff; font-weight: 700; font-size: 0.9rem;
+  display: inline-block; height: 40px; line-height: 40px; padding: 0 14px; margin: 0 6px 0 0;
+  border: 0; border-radius: 10px; background: #2a2a2e; color: #fff; font-weight: 700; font-size: 0.85rem;
   vertical-align: middle;
 }
 .ctrl.play { background: #ff0000; min-width: 92px; }
@@ -388,7 +390,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   border-bottom: 1px solid #272727;
 }
 .ch-row td { vertical-align: middle; padding: 8px 0 14px; }
-.ch-row td.ch-av-td { width: 60px; padding-right: 12px; }
+.ch-av-td { width: 52px; }
 .ch-name-td { width: 99%; }
 .ch-sub-td { width: 1%; white-space: nowrap; text-align: right; padding-left: 12px; }
 .ch-av {
@@ -634,53 +636,6 @@ body.player-fs .more-bar { display: none; }
   display: block;
   background: #000;
   aspect-ratio: 16 / 9;
-}
-.bot-help-btn {
-  display: none;
-  margin: 8px 0 16px;
-  min-height: 44px;
-  line-height: 44px;
-  padding: 0 20px;
-  font-size: 1rem;
-  font-weight: 700;
-}
-.help-box {
-  background: #1a1a1a;
-  border: 1px solid #303030;
-  border-radius: 12px;
-  padding: 16px 18px;
-  margin: 0 0 18px;
-}
-.help-lead { font-size: 1.05rem; line-height: 1.55; color: #ddd; }
-.help-box h2 { font-size: 1.05rem; margin: 0 0 10px; }
-.help-box ul { margin: 0; padding-left: 1.2em; color: #ccc; }
-.help-box li { margin: 8px 0; line-height: 1.5; }
-.help-steps { list-style: none; margin: 0 0 18px; padding: 0; }
-.help-steps li {
-  display: table;
-  width: 100%;
-  background: #181818;
-  border-radius: 12px;
-  padding: 14px 16px;
-  margin: 0 0 10px;
-}
-.help-n {
-  display: table-cell;
-  width: 40px;
-  vertical-align: top;
-  font-size: 1.4rem;
-  font-weight: 800;
-  color: #ff0000;
-  padding-right: 12px;
-}
-.help-steps h2 { font-size: 1.08rem; margin: 0 0 6px; }
-.help-steps p { color: #ccc; margin: 0 0 8px; line-height: 1.5; }
-.help-note { color: #ffd60a; }
-.help-steps code, .help-box code {
-  background: #111;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.92em;
 }
 .check { margin: 6px 0; font-size: 0.92rem; }
 .check .ok, .check .fail { font-weight: 700; }

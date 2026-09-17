@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Tesla Probe</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/app.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24"><polygon points="8,5 19,12 8,19"/></svg></div>
+      <div>
+        <h1>브라우저 진단</h1>
+        <div class="sub">Tesla QtWebEngine 능력 확인</div>
+      </div>
+    </div>
+    <button class="back" id="btnHome">홈</button>
+  </div>
+
+  <div class="block" style="text-align:center;font-weight:700"><span id="st">검사 중...</span></div>
+  <div class="block"><b>User-Agent</b><br><span id="ua" class="mono">...</span></div>
+  <div class="block"><b>엔진</b><br><span id="eng" class="mono">...</span></div>
+  <div class="block"><b>API</b><div id="apis"></div></div>
+  <div class="block"><b>코덱</b><br><span id="codecs" class="mono">...</span></div>
+  <div class="block"><b>WebGL</b><br><span id="webgl" class="mono">...</span></div>
+  <div class="block">
+    <b>마이크</b>
+    <button class="btn btn-gray" id="btnMic" style="width:100%;margin-top:8px">마이크 테스트</button>
+    <div id="micResult" class="mono"></div>
+  </div>
+  <button class="btn btn-red" id="btnReport" style="width:100%">리포트 만들기</button>
+  <div id="reportBox" class="mono block" style="display:none;max-height:360px;overflow:auto"></div>
+</div>
+<script src="../config.js?v=4"></script>
+<script src="../js/common.js?v=4"></script>
+<script>
+document.getElementById('btnHome').onclick = function () { tv.home(); };
+var st = document.getElementById('st');
+function setStatus(text, color) { st.textContent = text; if (color) st.style.color = color; }
+
+var uaStr = navigator.userAgent;
+document.getElementById('ua').textContent = uaStr;
+var isTesla = /QtCarBrowser|Tesla/i.test(uaStr);
+var isQt = /QtWebEngine/i.test(uaStr);
+setStatus(isTesla ? 'Tesla 브라우저 감지' : '일반 브라우저', isTesla ? '#3e6ae1' : '#32d74b');
+
+var chromeVer = (uaStr.match(/Chrome\/(\d+)/) || [])[1] || '?';
+var webkitVer = (uaStr.match(/AppleWebKit\/(\d+)/) || [])[1] || '?';
+document.getElementById('eng').textContent =
+  'Chromium: ' + chromeVer + ' | WebKit: ' + webkitVer +
+  ' | Platform: ' + (navigator.platform || '?') +
+  ' | Cores: ' + (navigator.hardwareConcurrency || '?') +
+  ' | Touch: ' + (navigator.maxTouchPoints || '?');
+
+var apisList = [
+  ['WebSocket', typeof WebSocket !== 'undefined'],
+  ['WebGL', !!document.createElement('canvas').getContext('webgl')],
+  ['Canvas 2D', !!document.createElement('canvas').getContext('2d')],
+  ['createImageBitmap', typeof createImageBitmap !== 'undefined'],
+  ['WebAssembly', typeof WebAssembly !== 'undefined'],
+  ['AudioContext', typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined'],
+  ['MediaSource', typeof MediaSource !== 'undefined'],
+  ['VideoDecoder', typeof VideoDecoder !== 'undefined'],
+  ['getUserMedia', !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)],
+  ['RTCPeerConnection', typeof RTCPeerConnection !== 'undefined'],
+  ['ServiceWorker', 'serviceWorker' in navigator],
+  ['Fullscreen', !!(document.fullscreenEnabled || document.webkitFullscreenEnabled)],
+];
+var apiHtml = '';
+for (var i = 0; i < apisList.length; i++) {
+  apiHtml += '<div class="r"><span>' + apisList[i][0] + '</span><span class="' + (apisList[i][1] ? 'ok' : 'fail') + '">' + (apisList[i][1] ? 'YES' : 'NO') + '</span></div>';
+}
+document.getElementById('apis').innerHTML = apiHtml;
+
+try {
+  var v = document.createElement('video');
+  document.getElementById('codecs').textContent =
+    'H.264:' + v.canPlayType('video/mp4; codecs="avc1.42E01E"') +
+    ' H.265:' + v.canPlayType('video/mp4; codecs="hev1.1.6.L120.90"') +
+    ' VP8:' + v.canPlayType('video/webm; codecs="vp8"') +
+    ' VP9:' + v.canPlayType('video/webm; codecs="vp9"');
+} catch (e) {
+  document.getElementById('codecs').textContent = e.message;
+}
+
+try {
+  var c = document.createElement('canvas');
+  var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+  if (gl) {
+    var di = gl.getExtension('WEBGL_debug_renderer_info');
+    var w = 'WebGL OK | WebGL2 ' + !!c.getContext('webgl2');
+    if (di) w += ' | GPU: ' + gl.getParameter(di.UNMASKED_RENDERER_WEBGL);
+    document.getElementById('webgl').textContent = w;
+  } else document.getElementById('webgl').textContent = 'WebGL 없음';
+} catch (e) {
+  document.getElementById('webgl').textContent = e.message;
+}
+
+document.getElementById('btnMic').onclick = function () {
+  var mr = document.getElementById('micResult');
+  mr.textContent = '테스트 중...';
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      mr.textContent = '마이크 OK: ' + (stream.getAudioTracks()[0].label || '?');
+      stream.getTracks().forEach(function (t) { t.stop(); });
+    }).catch(function (err) { mr.textContent = err.name + ': ' + err.message; });
+  } else mr.textContent = 'getUserMedia 없음 (Tesla는 보통 차단)';
+};
+
+document.getElementById('btnReport').onclick = function () {
+  var rp = document.getElementById('reportBox');
+  rp.style.display = 'block';
+  var lines = ['TESLA PROBE', new Date().toISOString(), uaStr, 'Tesla=' + isTesla, 'Qt=' + isQt, 'Chrome=' + chromeVer];
+  for (var i = 0; i < apisList.length; i++) lines.push(apisList[i][0] + ': ' + apisList[i][1]);
+  rp.textContent = lines.join('\n');
+};
+
+if (isTesla && navigator.sendBeacon) {
+  setTimeout(function () {
+    try {
+      navigator.sendBeacon(tv.url('/api/probe-report'), JSON.stringify({
+        ua: uaStr, isTesla: true, chromeVer: chromeVer, ts: new Date().toISOString()
+      }));
+    } catch (e) {}
+  }, 2000);
+}
+</script>
+</body>
+</html>

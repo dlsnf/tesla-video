@@ -27,25 +27,6 @@ fs.writeFileSync(
 
 const sessions = new Map();
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
-const SESSION_FILE = path.join(config.DATA_DIR, 'sessions.json');
-
-function loadSessions() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
-    Object.keys(raw || {}).forEach(function (k) {
-      if (raw[k]) sessions.set(k, raw[k]);
-    });
-  } catch (e) {}
-}
-function saveSessions() {
-  const obj = {};
-  sessions.forEach(function (v, k) { obj[k] = v; });
-  try {
-    fs.mkdirSync(config.DATA_DIR, { recursive: true });
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(obj));
-  } catch (e) {}
-}
-loadSessions();
 
 function parseCookies(header) {
   const out = {};
@@ -69,7 +50,7 @@ function queryToken(req) {
 
 function sessionOf(req) {
   const cookies = parseCookies(req.headers.cookie);
-  const token = cookies.tv_session || cookies.tv_token || queryToken(req) || req.headers['x-tv-token'];
+  const token = cookies.tv_session || queryToken(req) || req.headers['x-tv-token'];
   if (!token) return null;
   const rec = sessions.get(token);
   if (!rec) return null;
@@ -185,22 +166,14 @@ app.post('/api/auth/login', function (req, res) {
   }
   const token = crypto.randomBytes(18).toString('hex');
   sessions.set(token, { pin: pin, ts: Date.now() });
-  saveSessions();
-  res.setHeader('Set-Cookie', [
-    'tv_session=' + token + '; Path=/; Max-Age=2592000; SameSite=Lax',
-    'tv_token=' + token + '; Path=/; Max-Age=2592000; SameSite=Lax'
-  ]);
+  res.setHeader('Set-Cookie', 'tv_session=' + token + '; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax');
   res.json({ ok: true, token: token, pin: pin });
 });
 
 app.post('/api/auth/logout', function (req, res) {
   const token = parseCookies(req.headers.cookie).tv_session || queryToken(req) || req.headers['x-tv-token'];
   if (token) sessions.delete(token);
-  saveSessions();
-  res.setHeader('Set-Cookie', [
-    'tv_session=; Path=/; Max-Age=0; SameSite=Lax',
-    'tv_token=; Path=/; Max-Age=0; SameSite=Lax'
-  ]);
+  res.setHeader('Set-Cookie', 'tv_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax');
   res.json({ ok: true });
 });
 
@@ -280,12 +253,6 @@ app.post('/api/favorites/toggle', function (req, res) {
   const out = favorites.toggle(pin, req.body || {});
   if (!out.ok) return res.status(400).json(out);
   res.json(out);
-});
-
-app.get('/api/history', function (req, res) {
-  const pin = sessionPin(req);
-  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  res.json({ ok: true, items: history.read(pin) });
 });
 
 app.post('/api/history/watch', function (req, res) {
@@ -408,12 +375,7 @@ app.get('/api/youtube/home', async function (req, res) {
     tasks.push((async function () {
       try { extra = await youtubeOauth.mostPopular(n); } catch (e) { extra = null; }
       if (!extra || !extra.length) {
-        try {
-          extra = await Promise.race([
-            media.youtubeHome(n),
-            new Promise(function (_, rej) { setTimeout(function () { rej(new Error('home timeout')); }, 12000); }),
-          ]);
-        } catch (e2) { extra = []; }
+        try { extra = await media.youtubeHome(n); } catch (e2) { extra = []; }
       }
       extra = extra || [];
     })());
@@ -702,13 +664,12 @@ wss.on('connection', function (ws, req, parsed) {
   const start = stream.parseStart(parsed.query.start);
   const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
   const low = parsed.query.vbr === 'low';
-  const refresh = parsed.query.refresh === '1';
   if (!input) {
     ws.send(JSON.stringify({ type: 'error', message: 'url/channel 이 필요합니다' }));
     ws.close();
     return;
   }
-  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, refresh: refresh });
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low });
 });
 
 function shutdown() {

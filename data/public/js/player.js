@@ -13,15 +13,13 @@
   var resumeHeard = 0;
   var resumePending = false;
   var resumeSyncTimer = null;
-  var AUDIO_QUEUE_SEC = 2.5;
+  var AUDIO_QUEUE_SEC = 3.5;
   var PREROLL_SEC = 1.5;
   var bufTarget = 10;
   var VIDEO_CATCH_FRAMES = 2;
   var prerolling = false;
   var prerollAt = 0;
-  var prerollTimer = null;
   var rebuffering = false;
-  var lastStreamErr = '';
   var netBytes = 0;
   var pauseNet0 = -1;
   var streamHeld = false;
@@ -30,16 +28,6 @@
   var videoFail = 0;
   var ended = false;
   var streamEnded = false;
-  var repeatEnabled = false;
-  var repeatTimer = null;
-  var repeatAt = 0;
-
-  function updateRepeatButton() {
-    var button = $('btnRepeat');
-    if (!button) return;
-    button.classList.toggle('on', repeatEnabled);
-    button.setAttribute('aria-pressed', repeatEnabled ? 'true' : 'false');
-  }
   var audioMediaCursor = 0;
   var videoShownAt = 0;
   var videoFrames = 0;
@@ -47,13 +35,6 @@
   var seekPick = 0;
   var seekTouch = false;
   var seekSent = 0;
-  var seekDebounce = null;
-  var pendingSeekSec = null;
-  var pendingSeekOpts = null;
-  var seekSettleUntil = 0;
-  var streamRetry = 0;
-  var streamGen = 0;
-  var pipeTok = 0;
   var lastSyncRestart = 0;
   var videoCatching = false;
   var useHttpAudio = false, videoStartWall = 0;
@@ -92,18 +73,7 @@
   function beginReq() { return ++reqSeq; }
   function stillReq(seq) { return seq === reqSeq; }
 
-  function isBotErr(s) {
-    return /봇이 아님|not a bot|Sign in to confirm|봇으로 차단|페이지를 새로고침해야|page needs to be reloaded|Forbidden|403|format is not available/i.test(String(s || ''));
-  }
-  function showBotHelp(on) {
-    var b = $('btnBotHelp');
-    if (!b) return;
-    b.style.display = on ? 'inline-block' : 'none';
-  }
-  function setStatus(t) {
-    if (st) st.textContent = t;
-    showBotHelp(isBotErr(t));
-  }
+  function setStatus(t) { if (st) st.textContent = t; }
 
   function qsVal(name) {
     var raw = String(window.location.search || '');
@@ -149,31 +119,7 @@
   function historyAdd(item) {
     var h = historyGet().filter(function (x) { return x.id !== item.id; });
     h.unshift(item);
-    try { localStorage.setItem('tv_hist', JSON.stringify(h.slice(0, 24))); } catch (e) {}
-    tv.post('/api/history/watch', {
-      id: item.id,
-      channel_id: item.channel_id || '',
-      title: item.title || '',
-      url: item.url || '',
-      thumbnail: item.thumbnail || '',
-      duration: item.duration || 0,
-      uploader: item.uploader || ''
-    }, function () {});
-  }
-
-  function loadServerHistory() {
-    tv.get('/api/history', function (c, d) {
-      if (!d || !d.ok || !d.items || !d.items.length) return;
-      var cur = historyGet();
-      var map = {};
-      cur.forEach(function (x) { if (x && x.id) map[x.id] = x; });
-      d.items.forEach(function (x) {
-        if (!x || !x.id) return;
-        if (!map[x.id]) cur.push(x);
-      });
-      try { localStorage.setItem('tv_hist', JSON.stringify(cur.slice(0, 40))); } catch (e) {}
-      if (currentFeed === 'history') render();
-    });
+    localStorage.setItem('tv_hist', JSON.stringify(h.slice(0, 24)));
   }
 
   function looksLikeUrl(s) {
@@ -1069,17 +1015,9 @@
   function queuedAudio(pl) {
     pl = pl || player;
     try {
-      var out = pl && pl.audioOut;
-      if (!out || !out.context) return 0;
-      if (out.getEnqueuedTime) {
-        var t = out.getEnqueuedTime();
-        if (t > 0) return t;
+      if (pl && pl.audioOut && pl.audioOut.enqueuedTime) {
+        return Math.max(0, pl.audioOut.enqueuedTime);
       }
-      if (out.startTime > 0) {
-        var left = out.startTime - out.context.currentTime;
-        if (left > 0) return left;
-      }
-      if (out.enqueuedTime > 0) return out.enqueuedTime;
     } catch (e) {}
     return 0;
   }
@@ -1175,7 +1113,6 @@
 
   function skipVideoToSound(pl) {
     if (ended || prerolling || paused || !pl || !pl.video) return;
-    if (seekSettleUntil && Date.now() < seekSettleUntil) return;
     var heard = targetHeard();
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
@@ -1291,21 +1228,14 @@
   function packedAhead() {
     try {
       var vRate = videoByteRate();
-      var audioSec = bufferLeftSec(player && player.audio, 24000) + queuedAudio();
-      var videoSec = bufferLeftSec(player && player.video, vRate);
-      var sec = Math.min(audioSec, videoSec);
+      var sec = Math.max(
+        bufferLeftSec(player && player.audio, 24000),
+        bufferLeftSec(player && player.video, vRate)
+      );
       var cap = remainSec();
       if (sec > cap) sec = cap;
       return Math.max(0, sec);
     } catch (e) { return 0; }
-  }
-
-  function audioAheadSec() {
-    return Math.max(0, bufferLeftSec(player && player.audio, 24000) + queuedAudio());
-  }
-
-  function videoAheadSec() {
-    return Math.max(0, bufferLeftSec(player && player.video, videoByteRate()));
   }
 
   function videoByteRate() {
@@ -1334,10 +1264,7 @@
         return bitsUnread(dec) / dec.bits.bytes.length;
       } catch (e) { return 0; }
     }
-    var audioFill = fill(player && player.audio);
-    var videoFill = fill(player && player.video);
-    if (!player || !player.audio || !player.video) return Math.max(audioFill, videoFill);
-    return Math.min(audioFill, videoFill);
+    return Math.max(fill(player && player.audio), fill(player && player.video));
   }
 
   function streamSocket() {
@@ -1398,20 +1325,6 @@
     applyChrome();
     paintSeekBar();
     setStatus('종료');
-    scheduleRepeatPlayback();
-  }
-
-  function scheduleRepeatPlayback() {
-    if (!repeatEnabled || !playing || isLive || repeatTimer) return;
-    var src = playing;
-    repeatAt = Date.now() + 3000;
-    setStatus('3초 후 반복 재생');
-    repeatTimer = setTimeout(function () {
-      repeatTimer = null;
-      repeatAt = 0;
-      if (!repeatEnabled || !src || playing !== src || !ended) return;
-      playUrl(src, 0, { skipInfo: true });
-    }, 3000);
   }
 
   function applyStreamHold() {
@@ -1421,20 +1334,11 @@
     }
     var fill = decoderFill();
     var ahead = packedAhead();
-    var q = queuedAudio();
-    var audioAhead = audioAheadSec();
-    var videoAhead = videoAheadSec();
     var remain = remainSec();
-    if (!paused && (audioAhead < 0.8 || videoAhead < 0.5)) {
-      sendStreamCtrl(false);
-      return;
-    }
-    var wantHold = false;
+    var wantHold = fill >= 0.65;
     if (paused) {
       if (ahead >= bufTarget || ahead >= remain - 0.2) wantHold = true;
-    } else if (ahead >= bufTarget && q > 0.6) {
-      wantHold = true;
-    } else if (fill >= 0.65 && q > 1.2) {
+    } else if (ahead >= bufTarget) {
       wantHold = true;
     }
     if (wantHold) {
@@ -1473,7 +1377,7 @@
   }
 
   function bufferedAhead() {
-    return packedAhead();
+    return Math.max(0, queuedAudio() + packedAhead());
   }
 
   function hardenBits(dec) {
@@ -1507,19 +1411,6 @@
     };
   }
 
-  function showSeekBuf(fromSec, aheadSec) {
-    var buf = $('seekBuf');
-    if (!buf || !duration) return;
-    fromSec = Number(fromSec) || 0;
-    aheadSec = Number(aheadSec) || 0;
-    if (fromSec < 0) fromSec = 0;
-    if (aheadSec < 0) aheadSec = 0;
-    if (fromSec > duration) fromSec = duration;
-    if (fromSec + aheadSec > duration) aheadSec = duration - fromSec;
-    buf.style.left = ((fromSec / duration) * 100) + '%';
-    buf.style.width = ((aheadSec / duration) * 100) + '%';
-  }
-
   function paintSeekBar() {
     if (seeking) return;
     var seek = $('seek');
@@ -1538,13 +1429,16 @@
     if (pos > duration) pos = duration;
     seek.max = duration;
     seek.value = String(pos);
-    var ahead = packedAhead();
-    if (ahead > bufTarget) ahead = bufTarget;
+    var ahead = Math.max(packedAhead(), queuedAudio());
     if (ahead > duration - pos) ahead = Math.max(0, duration - pos);
-    bufEnd = pos + ahead;
+    var liveEnd = pos + ahead;
+    if (liveEnd > bufEnd) bufEnd = liveEnd;
+    if (bufEnd < pos) bufEnd = pos;
+    if (bufEnd > duration) bufEnd = duration;
     var playPct = pos / duration;
+    var bufPct = Math.min(1, bufEnd / duration);
     if ($('seekPlay')) $('seekPlay').style.width = (playPct * 100) + '%';
-    showSeekBuf(pos, ahead);
+    if ($('seekBuf')) $('seekBuf').style.width = (bufPct * 100) + '%';
     if ($('seekKnob')) $('seekKnob').style.left = (playPct * 100) + '%';
     var clock = fmtPlayClock(pos) + ' / ' + fmtPlayClock(duration);
     if (paused && ahead >= 0.5) clock += ' · +' + Math.round(ahead) + '초';
@@ -1552,8 +1446,6 @@
   }
 
   function stop(keepBox) {
-    streamGen += 1;
-    pipeTok += 1;
     if (relatedTimer) { clearTimeout(relatedTimer); relatedTimer = null; }
     if (player) { try { player.destroy(); } catch (e) {} player = null; }
     if (na) {
@@ -1564,10 +1456,6 @@
     if (forceTimer) { clearTimeout(forceTimer); forceTimer = null; }
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
-    if (seekDebounce) { clearTimeout(seekDebounce); seekDebounce = null; }
-    if (repeatTimer) { clearTimeout(repeatTimer); repeatTimer = null; }
-    repeatAt = 0;
-    updateRepeatButton();
     playing = null;
     paused = false;
     pausePos = -1;
@@ -1584,11 +1472,9 @@
     videoFail = 0;
     prerolling = false;
     prerollAt = 0;
-    if (prerollTimer) { clearTimeout(prerollTimer); prerollTimer = null; }
     rebuffering = false;
     ended = false;
     streamEnded = false;
-    clock0 = 0;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
@@ -1601,24 +1487,14 @@
     }
   }
 
-  function sameWatch(src) {
-    if (!src) return false;
-    if (playing && playing === src) return true;
-    if (watchItem && watchItem.url && watchItem.url === src) return true;
-    if (watchItem && watchItem.id && src.indexOf(watchItem.id) >= 0) return true;
-    return false;
-  }
-
   function playUrl(src, seek, opts) {
     var playSeq = beginReq();
     var keepPaused = !!(opts && opts.keepPaused);
-    var skipInfo = !!(opts && opts.skipInfo) && duration > 0 && sameWatch(src);
     wakeAudio();
     stop(true);
     playing = src;
     startAt = seek || 0;
     bufEnd = startAt;
-    showSeekBuf(startAt, 0);
     if (keepPaused) {
       paused = true;
       pausePos = startAt;
@@ -1629,21 +1505,8 @@
       if ($('btnPause')) $('btnPause').textContent = '일시정지';
     }
     applyChrome();
-    $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · 0 FPS';
-    if (skipInfo) {
-      paintSeekBar();
-      streamRetry = 0;
-      var tok = ++pipeTok;
-      var src0 = src;
-      var at0 = startAt;
-      setTimeout(function () {
-        if (tok !== pipeTok || playing !== src0) return;
-        startAt = at0;
-        startPipes(src0);
-      }, 400);
-      return;
-    }
     $('npTitle').textContent = '불러오는 중...';
+    $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · 0 FPS';
     stage.width = 640;
     stage.height = 360;
     videoAr = 16 / 9;
@@ -1677,7 +1540,10 @@
       fitStage();
       $('npTitle').textContent = info.title || src;
       paintSeekBar();
-      historyAdd({ id: info.id, channel_id: info.channel_id || '', title: info.title, url: info.pageUrl || src, thumbnail: info.thumbnail, duration: duration, uploader: info.uploader, views: info.views || 0 });
+      historyAdd({ id: info.id, title: info.title, url: info.pageUrl || src, thumbnail: info.thumbnail, duration: duration, uploader: info.uploader, views: info.views || 0 });
+      if (info.channel_id) {
+        tv.post('/api/history/watch', { id: info.id, channel_id: info.channel_id }, function () {});
+      }
       if ($('watchH')) $('watchH').textContent = info.title || '재생';
       if (info.id) rememberWatch(info.id, info.pageUrl || src);
       watchItem = {
@@ -1753,8 +1619,8 @@
     });
   }
 
-  function wsUrlFor(src, start, refresh) {
-    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : ''));
+  function wsUrlFor(src, start) {
+    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)));
   }
 
   function startHttpAudio(src) {
@@ -1857,7 +1723,7 @@
     videoStartWall = 0;
     unlockAudio();
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
-    launchPlayer(wsUrlFor(src, startAt, startAt > 2));
+    launchPlayer(wsUrlFor(src, startAt));
     if (paused) {
       holdPlayback();
       videoStartWall = Date.now();
@@ -1881,31 +1747,24 @@
       }
     }, 250);
     if (forceTimer) clearTimeout(forceTimer);
-    var failWait = 45000;
-    if (startAt > 2) failWait += Math.min(120000, Math.floor(startAt) * 500);
     forceTimer = setTimeout(function () {
       forceTimer = null;
-      if (!playing || paused || ended) return;
-      if ((prerolling || !videoStartWall) && netBytes < 8000) failPreroll();
-    }, failWait);
+      if (!playing || paused) return;
+      var fpsEl = $('npFps');
+      var fpsTxt = fpsEl ? fpsEl.textContent : '';
+      if (!videoStartWall) {
+        setStatus('영상이 시작되지 않았습니다. 360으로 다시 눌러 보거나 다른 영상을 선택해 보세요.');
+      }
+    }, 10000);
 
     tickTimer = setInterval(function () {
       if (!playing) return;
       if (ended) {
-        if (repeatAt > Date.now()) {
-          setStatus(Math.ceil((repeatAt - Date.now()) / 1000) + '초 후 반복 재생');
-        } else {
-          setStatus('종료');
-        }
+        setStatus('종료');
         paintSeekBar();
         return;
       }
-      if (prerolling && !paused && !lastStreamErr) {
-        var cur = st ? st.textContent : '';
-        if (!cur || cur === '불러오는 중' || cur === '재생' || /MPEG1|이동 중|위치부터 받는/.test(cur)) {
-          setStatus(startAt > 2 ? '지정한 위치로 이동 중...' : '불러오는 중');
-        }
-      }
+      if (prerolling && !paused) setStatus('불러오는 중');
       if (paused) {
         hookNetBytes();
         applyStreamHold();
@@ -1981,31 +1840,40 @@
       } catch (e) {}
       var ctx = this.context;
       var now = ctx.currentTime;
-      if (!(this.startTime > now - 0.004)) this.startTime = now;
       var nSamp = left.length;
       var dur = nSamp / rate;
+      var offset = 0;
+      if (this.startTime < now) {
+        offset = now - this.startTime;
+        if (offset >= dur) {
+          this.startTime += dur;
+          audioMediaCursor += dur;
+          return;
+        }
+      }
       var buf = ctx.createBuffer(2, nSamp, rate);
       var ch0 = buf.getChannelData(0);
       var ch1 = buf.getChannelData(1);
       ch0.set(left);
       ch1.set(right);
-      if (this.startTime <= now + 0.003) {
-        var fadeN = Math.min(96, nSamp);
+      if (offset > 0) {
+        var fadeAt = Math.floor(offset * rate);
+        var fadeN = Math.min(64, nSamp - fadeAt);
         var f = 0;
         for (; f < fadeN; f++) {
           var g = f / fadeN;
-          ch0[f] *= g;
-          ch1[f] *= g;
+          ch0[fadeAt + f] *= g;
+          ch1[fadeAt + f] *= g;
         }
       }
       var src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(this.destination);
-      var when = this.startTime;
+      var when = this.startTime + offset;
       if (Math.abs(this.gain.gain.value - this.volume) > 0.01) this.gain.gain.value = this.volume;
-      src._mediaAt = audioMediaCursor;
+      src._mediaAt = audioMediaCursor + offset;
       src._ctxAt = when;
-      src._dur = dur;
+      src._dur = dur - offset;
       var out = this;
       src.onended = function () {
         try { src.disconnect(); } catch (e2) {}
@@ -2016,10 +1884,9 @@
           else k++;
         }
       };
-      try { src.start(when); } catch (e3) { try { src.start(now); } catch (e4) {} }
+      try { src.start(when, offset); } catch (e3) { src.start(when); }
       this.startTime += dur;
       audioMediaCursor += dur;
-      this.enqueuedTime = Math.max(0, this.startTime - ctx.currentTime);
       if (!this._srcs) this._srcs = [];
       this._srcs.push(src);
     };
@@ -2033,34 +1900,16 @@
     return s;
   }
 
-  function failPreroll(msg) {
-    if (!prerolling) return;
-    var failedMessage = msg || lastStreamErr;
-    prerolling = false;
-    if (prerollTimer) { clearTimeout(prerollTimer); prerollTimer = null; }
-    var m = failedMessage;
-    if (!m) {
-      m = startAt > 2
-        ? '지정한 위치의 영상을 아직 받지 못했습니다. 시크가 실패한 것이지, 유튜브 차단과는 다를 수 있습니다.'
-        : '영상을 시작하지 못했습니다. 스트림이 오지 않았습니다.';
-    }
-    stop(true);
-    setStatus(m);
-  }
-
   function flushPrerollAudio(out) {
     if (!out) return;
-    if (prerollTimer) { clearTimeout(prerollTimer); prerollTimer = null; }
     var pend = out._pending || [];
     out._pending = [];
     prerolling = false;
     rebuffering = false;
-    streamRetry = 0;
-    if (startAt > 1) seekSettleUntil = Date.now() + 2500;
     try {
       var ctx = out.context;
       var now = ctx ? ctx.currentTime : 0;
-      if (!(out.startTime > now + 0.05)) out.startTime = now;
+      if (!(out.startTime > now)) out.startTime = now;
       if (ctx && ctx.state !== 'running' && ctx.resume) ctx.resume();
     } catch (e0) {}
     var i;
@@ -2075,15 +1924,19 @@
     rebuffering = true;
     prerollAt = Date.now();
     sendStreamCtrl(false);
+    try {
+      var ctx = player.audioOut && player.audioOut.context;
+      if (ctx && ctx.state === 'running' && ctx.suspend) ctx.suspend();
+    } catch (e) {}
     setStatus('불러오는 중');
   }
 
   function shouldRebuffer() {
     if (ended || streamEnded || paused || prerolling || !player) return false;
     if (videoStartWall && Date.now() - videoStartWall < 2500) return false;
-    var audioLow = audioAheadSec() < 0.45 && queuedAudio() < 0.35;
-    var videoLow = videoAheadSec() < 0.25;
-    return audioLow || videoLow;
+    var q = queuedAudio();
+    var packed = packedAhead();
+    return q < 0.4 && packed < 0.3;
   }
 
   function patchMpegPacing() {
@@ -2114,26 +1967,16 @@
           n++;
           if (!this.audio.decode()) break;
         }
-        if (this.video && this.video.currentTime === 0) {
-          var vd = 0;
-          while (vd < 8 && this.video.currentTime === 0) {
-            vd++;
-            if (!this.video.decode()) break;
-          }
-        }
+        if (this.video && this.video.currentTime === 0) this.video.decode();
         var readyA = pendingAudioSec(this.audioOut);
         var readyV = this.video && this.video.currentTime > 0;
         var waited = prerollAt ? (Date.now() - prerollAt) : 0;
         var minA = rebuffering ? 0.8 : 0.3;
         var maxWait = rebuffering ? 20000 : 8000;
-        if ((readyA >= need && readyV) || (waited > 4000 && readyV && readyA > 0.2) || (waited > maxWait && readyA > minA && readyV)) {
+        if ((readyA >= need && readyV) || (waited > maxWait && readyA > minA && readyV)) {
           flushPrerollAudio(this.audioOut);
           setStatus('재생');
         } else {
-          if (!rebuffering && startAt <= 2 && waited > 15000 && readyA < 0.05) {
-            failPreroll();
-            return;
-          }
           if (rebuffering && waited > 8000 && nearEnd() && supplyDrained()) {
             finishPlayback();
             return;
@@ -2143,12 +1986,12 @@
         }
       }
       if (this.audio && this.audioOut && this.audioOut.enabled) {
-        var queued = queuedAudio(this);
+        var queued = this.audioOut.enqueuedTime || 0;
         var n2 = 0;
-        while (queued < AUDIO_QUEUE_SEC && n2 < 24) {
+        while (queued < AUDIO_QUEUE_SEC && n2 < 48) {
           n2++;
           if (!this.audio.decode()) break;
-          queued = queuedAudio(this);
+          queued = this.audioOut.enqueuedTime || 0;
         }
       }
       if (!this.video) return;
@@ -2159,7 +2002,6 @@
   }
 
   function launchPlayer(wsUrl) {
-    var gen = ++streamGen;
     if (player) { try { player.destroy(); } catch (e) {} player = null; }
     clock0 = 0;
     fpsCount = 0;
@@ -2171,7 +2013,6 @@
     videoShownAt = 0;
     videoFrames = 0;
     videoCatching = false;
-    seekSettleUntil = 0;
     lastHeard = 0;
     resumeHeard = 0;
     resumePending = false;
@@ -2182,15 +2023,6 @@
     soundResyncing = false;
     prerolling = true;
     prerollAt = Date.now();
-    lastStreamErr = '';
-    if (prerollTimer) clearTimeout(prerollTimer);
-    var waitMs = 45000;
-    if (startAt > 2) waitMs += Math.min(120000, Math.floor(startAt) * 500);
-    prerollTimer = setTimeout(function () {
-      prerollTimer = null;
-      if (netBytes > 8000) return;
-      failPreroll();
-    }, waitMs);
     rebuffering = false;
     ended = false;
     streamEnded = false;
@@ -2239,58 +2071,28 @@
       applyPlayerVol();
       fitStage();
       disableReconnect();
-      hookNetBytes(gen);
-      try {
-        player.wantsToPlay = true;
-        player.paused = false;
-        if (player.play) player.play();
-      } catch (ePlay) {}
-      setTimeout(function () { if (gen === streamGen) hookNetBytes(gen); }, 200);
-      setTimeout(function () { if (gen === streamGen) hookNetBytes(gen); }, 1000);
+      hookNetBytes();
+      setTimeout(hookNetBytes, 200);
+      setTimeout(hookNetBytes, 1000);
     } catch (e) {
       setStatus('플레이어 오류: ' + e.message);
     }
   }
 
-  function hookNetBytes(gen) {
-    if (gen == null) gen = streamGen;
+  function hookNetBytes() {
     if (!player || !player.source) return;
     var src = player.source;
-    if (src.__byteHook && src.__hookGen === gen) {
+    if (src.__byteHook) {
       if (src.socket && src.__onMsg) src.socket.onmessage = src.__onMsg;
-      if (src.socket && src.__onClose) src.socket.onclose = src.__onClose;
       return;
     }
     if (!src.onMessage) return;
     var orig = src.onMessage.bind(src);
-    src.__hookGen = gen;
     src.__onMsg = function (ev) {
-      if (gen !== streamGen) return;
       if (ev && typeof ev.data === 'string') {
         try {
           var msg = JSON.parse(ev.data);
           if (msg && msg.type === 'ended') markStreamEnded();
-          if (msg && (msg.type === 'error' || msg.type === 'status') && msg.message) {
-            var sm = String(msg.message).replace(/\s+/g, ' ').trim();
-            if (/ERROR:|Forbidden|403|unable to|format is not available|페이지를 새로고침|봇이 아님|지정한 위치의 영상/i.test(sm)) {
-              lastStreamErr = sm.slice(0, 240);
-              if (prerolling && /지정한 위치의 영상/i.test(sm)) {
-                setStatus(startAt > 2 ? '지정한 위치부터 다시 받는 중...' : '불러오는 중');
-              } else {
-                setStatus(lastStreamErr);
-                if (prerolling) failPreroll(lastStreamErr);
-              }
-            } else if (/동시 재생 한도/.test(sm)) {
-              setTimeout(function () {
-                if (gen !== streamGen) return;
-                if (playing && prerolling) startPipes(playing);
-              }, 500);
-            } else if (/MPEG1|위치부터 받는/.test(sm) && !lastStreamErr) {
-              setStatus(startAt > 2 ? '지정한 위치로 이동 중...' : '불러오는 중');
-            } else if (!lastStreamErr && sm && !/MPEG1|확인하는|위치부터 받는/.test(sm)) {
-              setStatus(sm.slice(0, 180));
-            }
-          }
         } catch (e0) {}
         return;
       }
@@ -2302,33 +2104,16 @@
     src.__byteHook = true;
     src.onMessage = src.__onMsg;
     if (src.socket) src.socket.onmessage = src.__onMsg;
-    var origClose = src.__origClose || (src.onClose ? src.onClose.bind(src) : null);
-    src.__origClose = origClose;
-    src.__onClose = function () {
-      if (src.__closedOnce) return;
-      src.__closedOnce = true;
-      if (gen !== streamGen) return;
-      disableReconnect();
-      if (origClose) {
-        try { origClose(); } catch (eC) {}
-      }
-      if (prerolling && playing && !ended && !paused) {
-        if (netBytes >= 4000) return;
-        if (streamRetry < 1) {
-          streamRetry += 1;
-          setTimeout(function () {
-            if (gen !== streamGen) return;
-            if (playing && prerolling && !ended) launchPlayer(wsUrlFor(playing, startAt, startAt > 2));
-          }, 350);
-          return;
-        }
-        failPreroll(lastStreamErr || '지정한 위치로 이동하지 못했습니다. 다시 눌러 보세요.');
-        return;
-      }
-      if (!ended && playing && (streamEnded || nearEnd())) markStreamEnded();
-    };
-    src.onClose = src.__onClose;
-    if (src.socket) src.socket.onclose = src.__onClose;
+    if (!src.__endHook) {
+      src.__endHook = true;
+      var origClose = src.onClose ? src.onClose.bind(src) : null;
+      src.onClose = function () {
+        disableReconnect();
+        if (origClose) origClose();
+        if (!ended && playing && (streamEnded || nearEnd())) markStreamEnded();
+      };
+      if (src.socket) src.socket.onclose = src.onClose.bind(src);
+    }
   }
 
   function seekTo(sec) {
@@ -2338,21 +2123,12 @@
     if (duration && sec > duration - 2) sec = Math.max(0, duration - 2);
     seeking = false;
     seekSent = Date.now();
-    pendingSeekSec = sec;
-    pendingSeekOpts = paused ? { keepPaused: true, skipInfo: true } : { skipInfo: true };
-    if ($('npTime') && duration) $('npTime').textContent = fmtPlayClock(sec) + ' / ' + fmtPlayClock(duration);
-    setStatus(sec > 1 ? '지정한 위치로 이동 중...' : '불러오는 중');
-    if (seekDebounce) clearTimeout(seekDebounce);
-    seekDebounce = setTimeout(function () {
-      seekDebounce = null;
-      var t = pendingSeekSec;
-      var o = pendingSeekOpts || { skipInfo: true };
-      pendingSeekSec = null;
-      pendingSeekOpts = null;
-      if (t == null || !playing) return;
-      if (!o.keepPaused) pausePos = -1;
-      playUrl(playing, t, o);
-    }, 280);
+    if (paused) {
+      playUrl(playing, sec, { keepPaused: true });
+      return;
+    }
+    pausePos = -1;
+    playUrl(playing, sec);
   }
 
   function seekPctFromEvent(e) {
@@ -2373,7 +2149,6 @@
     seekPick = pct * duration;
     if ($('seekPlay')) $('seekPlay').style.width = (pct * 100) + '%';
     if ($('seekKnob')) $('seekKnob').style.left = (pct * 100) + '%';
-    showSeekBuf(seekPick, 0);
     if ($('seek')) $('seek').value = String(seekPick);
     if ($('npTime')) $('npTime').textContent = fmtPlayClock(seekPick) + ' / ' + fmtPlayClock(duration);
   }
@@ -2672,58 +2447,15 @@
     stop(false);
     location.href = tv.url('/player/');
   };
-  if ($('btnBotHelp')) $('btnBotHelp').onclick = function () {
-    location.href = tv.url('/help/youtube/');
-  };
   if ($('btnStop')) $('btnStop').onclick = function () { stop(false); setStatus('정지'); };
   if ($('btnPause')) $('btnPause').onclick = togglePause;
-  if ($('btnRepeat')) $('btnRepeat').onclick = function () {
-    repeatEnabled = !repeatEnabled;
-    updateRepeatButton();
-    if (repeatEnabled && ended) scheduleRepeatPlayback();
-    if (!repeatEnabled && repeatTimer) {
-      clearTimeout(repeatTimer);
-      repeatTimer = null;
-      repeatAt = 0;
-      if (ended) setStatus('종료');
-    }
-  };
-  updateRepeatButton();
   if ($('btnFromStart')) $('btnFromStart').onclick = function () {
     if (!playing) return;
-    playUrl(playing, 0, { skipInfo: true });
+    playUrl(playing, 0);
   };
   if ($('tapLayer')) $('tapLayer').onclick = onPlayerTap;
-  function bindTap(el, fn) {
-    if (!el) return;
-    var last = 0;
-    function go(e) {
-      if (e) {
-        if (e.preventDefault) e.preventDefault();
-        if (e.stopPropagation) e.stopPropagation();
-      }
-      var now = Date.now();
-      if (now - last < 600) return;
-      last = now;
-      fn();
-    }
-    el.ontouchend = go;
-    el.onclick = function (e) {
-      if (Date.now() - last < 600) {
-        if (e && e.preventDefault) e.preventDefault();
-        return;
-      }
-      go(e);
-    };
-  }
-  bindTap($('btnBack'), function () {
-    var base = pendingSeekSec != null ? pendingSeekSec : currentPos();
-    seekTo(base - 10);
-  });
-  bindTap($('btnFwd'), function () {
-    var base = pendingSeekSec != null ? pendingSeekSec : currentPos();
-    seekTo(base + 10);
-  });
+  if ($('btnBack')) $('btnBack').onclick = function () { seekTo(currentPos() - 10); };
+  if ($('btnFwd')) $('btnFwd').onclick = function () { seekTo(currentPos() + 10); };
   if ($('btnFs')) $('btnFs').onclick = function (e) { if (e) e.stopPropagation(); setFs(!fsOn); };
   var lastVol = 100;
   function setVol(pct) {
@@ -2761,7 +2493,6 @@
       if (!seeking) return;
       previewSeek(seekPctFromEvent(e));
       seekTo(seekPick);
-      seekTouch = false;
     };
     wrap.onmousedown = function (e) {
       if (seekTouch) return;
@@ -2785,7 +2516,7 @@
     };
     wrap.onclick = function (e) {
       if (seekTouch) { seekTouch = false; return; }
-      if (Date.now() - seekSent < 1200) return;
+      if (Date.now() - seekSent < 500) return;
       if (!duration) return;
       previewSeek(seekPctFromEvent(e));
       seekTo(seekPick);
@@ -2800,7 +2531,6 @@
       previewSeek(Math.max(0, Math.min(1, v / duration)));
     };
     $('seek').onchange = function () {
-      if (Date.now() - seekSent < 400) return;
       seekTo(parseFloat(this.value) || 0);
     };
   }
@@ -2827,7 +2557,7 @@
   });
   bindToggleBtns('.bbtn', 'bbtn', function (el) {
     var n = parseInt(el.getAttribute('data-buf'), 10);
-    bufTarget = (n === 10 || n === 20 || n === 30) ? n : 10;
+    bufTarget = (n === 15 || n === 20) ? n : 10;
     applyStreamHold();
   }, false);
 
@@ -3062,7 +2792,6 @@
       currentPin = (d && d.pin) || '';
       paintLogoutLabel();
     });
-    loadServerHistory();
     loadFavMap();
     loadSubMap();
     if (stage) {

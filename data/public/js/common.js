@@ -1,38 +1,7 @@
 (function (w) {
   function base() { return w.APP_BASE || ''; }
-  function getToken() {
-    var t = '';
-    try { t = localStorage.getItem('tv_token') || ''; } catch (e) {}
-    if (t) return t;
-    try {
-      var m = String(document.cookie || '').match(/(?:^|; )tv_token=([^;]*)/);
-      if (m) t = decodeURIComponent(m[1] || '');
-    } catch (e2) {}
-    if (t) return t;
-    try {
-      var q = /(?:^|[?&])token=([^&]*)/.exec(String(w.location.search || ''));
-      if (q) t = decodeURIComponent(q[1] || '');
-    } catch (e3) {}
-    return t || '';
-  }
-  function setToken(t) {
-    t = String(t || '');
-    if (!t) return;
-    try { localStorage.setItem('tv_token', t); } catch (e) {}
-    try {
-      var p = base() || '/';
-      document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=' + p + '; max-age=31536000; samesite=lax';
-      if (p !== '/') document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=/; max-age=31536000; samesite=lax';
-    } catch (e2) {}
-    try {
-      if (w.history && w.history.replaceState && String(w.location.search || '').indexOf('token=') < 0) {
-        var href = String(w.location.href || '');
-        w.history.replaceState(null, '', href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(t));
-      }
-    } catch (e3) {}
-  }
   function withToken(u) {
-    var token = getToken();
+    var token = localStorage.getItem('tv_token');
     if (!token) return u;
     return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
   }
@@ -45,10 +14,9 @@
   function xhr(method, path, body, cb) {
     var x = new XMLHttpRequest();
     x.open(method, url(path), true);
-    x.withCredentials = true;
     x.timeout = 60000;
     x.setRequestHeader('Accept', 'application/json');
-    var token = getToken();
+    var token = localStorage.getItem('tv_token');
     if (token) x.setRequestHeader('X-Tv-Token', token);
     if (body) x.setRequestHeader('Content-Type', 'application/json');
     x.onload = function () {
@@ -105,21 +73,6 @@
     return m + ':' + pad2(s);
   }
 
-  function stampLinks() {
-    var token = getToken();
-    if (!token) return;
-    var as = document.getElementsByTagName('a');
-    var i;
-    for (i = 0; i < as.length; i++) {
-      var href = as[i].getAttribute('href');
-      if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) continue;
-      if (href.indexOf('mailto:') === 0) continue;
-      if (href.indexOf('token=') >= 0) continue;
-      if (/^https?:/i.test(href) && href.indexOf(w.location.host) < 0) continue;
-      as[i].href = href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
-    }
-  }
-
   function home() { w.location.href = url('/') || '/'; }
 
   function showPin(done) {
@@ -145,8 +98,7 @@
       if (pin.length >= 4) {
         post('/api/auth/login', { pin: pin }, function (st, d) {
           if (d && d.ok) {
-            if (d.token) setToken(d.token);
-            stampLinks();
+            if (d.token) localStorage.setItem('tv_token', d.token);
             mask.className = 'pin-mask';
             if (done) done();
           } else {
@@ -161,15 +113,9 @@
 
   function ensurePin(done) {
     get('/api/auth/status', function (status, data) {
-      if (data && data.authed) {
-        var t0 = getToken();
-        if (t0) setToken(t0);
-        stampLinks();
-        if (done) done();
-        return;
-      }
-      var token = getToken();
-      if (token && data && data.authed) { if (done) done(); return; }
+      if (data && data.authed) { if (done) done(); return; }
+      var token = '';
+      try { token = localStorage.getItem('tv_token') || ''; } catch (e) {}
       if (token && (status === 0 || !data)) { if (done) done(); return; }
       showPin(done);
     });
@@ -178,10 +124,9 @@
   function logout(done) {
     post('/api/auth/logout', {}, function () {
       try { localStorage.removeItem('tv_token'); } catch (e) {}
-      try { document.cookie = 'tv_token=; path=/; max-age=0'; } catch (e2) {}
       showPin(done);
     });
   }
 
-  w.tv = { url: url, ws: ws, get: get, post: post, fmtDur: fmtDur, fmtViews: fmtViews, fmtAgo: fmtAgo, home: home, ensurePin: ensurePin, logout: logout, stampLinks: stampLinks, getToken: getToken, setToken: setToken };
+  w.tv = { url: url, ws: ws, get: get, post: post, fmtDur: fmtDur, fmtViews: fmtViews, fmtAgo: fmtAgo, home: home, ensurePin: ensurePin, logout: logout };
 })(window);

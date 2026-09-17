@@ -7,71 +7,26 @@ const { run } = require('./proc');
 
 const resolveCache = new Map();
 const searchCache = new Map();
-const RESOLVE_TTL = 5 * 60 * 1000;
+const RESOLVE_TTL = 3 * 60 * 1000;
 const SEARCH_TTL = 8 * 60 * 1000;
 const inflight = new Map();
 
-setInterval(function () {
-  const now = Date.now();
-  resolveCache.forEach(function (entry, key) {
-    if (!entry || now - entry.ts > RESOLVE_TTL) resolveCache.delete(key);
-  });
-  searchCache.forEach(function (entry, key) {
-    if (!entry || now - entry.ts > SEARCH_TTL) searchCache.delete(key);
-  });
-}, 60 * 1000).unref();
-
-function isBotBlock(err) {
-  return /봇이 아님|not a bot|Sign in to confirm|페이지를 새로고침해야|page needs to be reloaded|Requested format is not available|사용 가능한 형식/i.test(String((err && err.message) || err || ''));
-}
-
-function botHint() {
-  return '유튜브가 재생을 막았습니다. 조치 방법 보기를 눌러 쿠키를 다시 넣어 주세요.';
-}
-
 function ytdlpArgs(extra, opts) {
   opts = opts || {};
-  const client = opts.client || 'default';
   const args = [
     '--no-warnings',
+    '--ignore-errors',
     '--geo-bypass',
-    '--force-ipv4',
     '--socket-timeout', '12',
-    '--js-runtimes', 'node:' + process.execPath,
     '--add-header', 'Accept-Language:ko-KR,ko;q=0.9,en;q=0.3',
-    '--extractor-args', 'youtube:player_client=' + client + ';lang=ko',
+    '--extractor-args', 'youtube:player_client=android,web;lang=ko',
   ];
-  if (opts.ignoreErrors !== false) args.push('--ignore-errors');
   if (!opts.playlist) args.unshift('--no-playlist');
-  if (opts.cookies !== false) {
-    var cookiePath = config.getCookiesFile ? config.getCookiesFile() : config.COOKIES_FILE;
-    if (cookiePath) args.push('--cookies', cookiePath);
+  var cookiePath = config.getCookiesFile ? config.getCookiesFile() : config.COOKIES_FILE;
+  if (cookiePath) {
+    args.push('--cookies', cookiePath);
   }
   return args.concat(extra);
-}
-
-async function ytdlpRun(extra, opts) {
-  opts = opts || {};
-  const timeout = Math.min(Math.max(opts.timeout || 20000, 5000), 60000);
-  const playlist = !!opts.playlist;
-  const tries = [
-    { client: 'default', cookies: false },
-    { client: 'web_embedded', cookies: false },
-  ];
-  var last = null;
-  for (var i = 0; i < tries.length; i++) {
-    try {
-      return await run(config.YT_DLP, ytdlpArgs(extra, {
-        playlist: playlist,
-        client: tries[i].client,
-        cookies: tries[i].cookies,
-      }), { timeout: timeout });
-    } catch (e) {
-      last = e;
-      if (!isBotBlock(e)) throw e;
-    }
-  }
-  throw Object.assign(new Error(botHint()), last || {});
 }
 
 function extractYoutubeId(input) {
@@ -158,72 +113,17 @@ function heightForQuality(quality) {
   return 360;
 }
 
-function parseJsonBlob(stdout) {
-  var raw = String(stdout || '').trim();
-  if (!raw) return null;
-  if (raw.charAt(0) === '{') {
-    try { return JSON.parse(raw); } catch (e) {}
-  }
-  var lines = raw.split(/\r?\n/);
-  for (var i = 0; i < lines.length; i++) {
-    var t = lines[i].trim();
-    if (t.charAt(0) !== '{') continue;
-    try { return JSON.parse(t); } catch (e2) {}
-  }
-  return null;
-}
-
-function isBrokenItag(f) {
-  var id = String((f && f.format_id) || '');
-  return id === '17' || id === '18' || id === '22';
-}
-
-function stripBrokenFormats(data) {
-  if (!data || typeof data !== 'object') return data;
-  if (Array.isArray(data.formats)) {
-    data.formats = data.formats.filter(function (f) { return f && !isBrokenItag(f); });
-  }
-  delete data.requested_formats;
-  delete data.requested_downloads;
-  delete data.format_id;
-  delete data.url;
-  return data;
-}
-
-function pickDumpUrls(data) {
-  if (!data) return null;
-  var v = null;
-  var a = null;
-  var req = (data.requested_formats || []).filter(function (f) { return f && !isBrokenItag(f); });
-  if (!req.length && Array.isArray(data.formats)) {
-    req = data.formats.filter(function (f) { return f && f.url && !isBrokenItag(f); });
-  }
-  if (Array.isArray(req)) {
-    req.forEach(function (f) {
-      if (!f || !f.url) return;
-      if (f.vcodec && f.vcodec !== 'none' && !v) v = f;
-      if (f.acodec && f.acodec !== 'none' && !a) a = f;
-    });
-    if (!v && req[0]) v = req[0];
-    if (!a) a = req[1] || v;
-  }
-  if (!v && data.url) {
-    v = { url: data.url, http_headers: data.http_headers, width: data.width, height: data.height };
-    a = v;
-  }
-  if (!v || !v.url) return null;
-  return { video: v, audio: a || v };
-}
-
 function formatForQuality(quality) {
   const h = heightForQuality(quality);
+  if (h <= 360) {
+    return '18/b[height<=360][ext=mp4]/bv*[height<=360]+bestaudio/best[height<=360]/best';
+  }
   return [
-    '134+140',
-    '135+140',
-    '160+139',
-    'bestvideo[height<=' + h + ']+bestaudio',
-    'bv*[height<=' + h + '][format_id!=18]+ba',
-    'best[format_id!=18]',
+    'b[height<=' + h + '][ext=mp4]',
+    'bv*[height<=' + h + '][ext=mp4]+bestaudio',
+    'best[height<=' + h + ']',
+    '18',
+    'best',
   ].join('/');
 }
 
@@ -281,13 +181,6 @@ function cacheSet(map, key, value) {
   map.set(key, { ts: Date.now(), value: value });
 }
 
-function invalidateSource(id) {
-  var needle = '|' + String(id || '') + '|';
-  resolveCache.forEach(function (_v, k) {
-    if (String(k).indexOf(needle) >= 0) resolveCache.delete(k);
-  });
-}
-
 function once(key, fn) {
   if (inflight.has(key)) return inflight.get(key);
   const p = Promise.resolve().then(fn).then(function (v) {
@@ -312,97 +205,85 @@ async function resolveSource(input, quality) {
   if (cached) return cached;
 
   const format = formatForQuality(q);
-  const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s';
-  let dumpJson = null;
-  let dump = null;
+  const args = ytdlpArgs([
+    '-f', format,
+    '--print', '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s',
+    '-g',
+    classified.pageUrl,
+  ]);
+
+  let result;
   try {
-    const result = await ytdlpRun(['-J', classified.pageUrl], { timeout: 40000 });
-    dumpJson = stripBrokenFormats(parseJsonBlob(result.stdout));
-    dump = pickDumpUrls(dumpJson);
+    result = await run(config.YT_DLP, args, { timeout: 40000 });
   } catch (e) {
     try {
-      const result2 = await ytdlpRun(['-f', 'bestvideo+bestaudio/best[format_id!=18]', '-J', classified.pageUrl], { timeout: 40000 });
-      dumpJson = stripBrokenFormats(parseJsonBlob(result2.stdout));
-      dump = pickDumpUrls(dumpJson);
+      result = await run(config.YT_DLP, ytdlpArgs([
+        '-f', '18/best',
+        '--print', '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s',
+        '-g',
+        classified.pageUrl,
+      ]), { timeout: 40000 });
     } catch (e2) {
-      dump = null;
+    if (classified.type === 'direct' && /^https?:\/\//i.test(classified.pageUrl)) {
+      const fallback = {
+        type: 'direct',
+        id: classified.id,
+        title: classified.pageUrl.split('/').pop() || 'Video',
+        duration: 0,
+        isLive: false,
+        uploader: '',
+        channel: '',
+        channel_id: '',
+        thumbnail: '',
+        pageUrl: classified.pageUrl,
+        videoUrl: classified.pageUrl,
+        audioUrl: classified.pageUrl,
+        quality: q,
+        width: sizeForQuality(q, 16, 9).width,
+        height: sizeForQuality(q, 16, 9).height,
+        aspect: 16 / 9,
+        scale: scaleForQuality(q),
+        bitrate: bitrateForQuality(q),
+      };
+      cacheSet(resolveCache, key, fallback);
+      return fallback;
+    }
+    throw e2;
     }
   }
+  const lines = result.stdout.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+  if (!lines.length) throw new Error('영상 주소를 가져오지 못했습니다');
 
-  let info;
-  if (dump && dump.video && dump.video.url) {
-    const vf = dump.video;
-    const af = dump.audio || dump.video;
-    const sized = sizeForQuality(q, vf.width || dumpJson && dumpJson.width, vf.height || dumpJson && dumpJson.height);
-    const d = dumpJson || {};
-    info = {
-      type: classified.type,
-      id: d.id || classified.id,
-      title: d.title || classified.id,
-      duration: parseInt(d.duration, 10) || 0,
-      isLive: !!d.is_live,
-      uploader: d.uploader || d.channel || '',
-      channel: d.channel || d.uploader || '',
-      channel_id: d.channel_id || '',
-      avatar: d.uploader_avatar_url || d.thumbnail || '',
-      views: parseInt(d.view_count, 10) || 0,
-      uploaded: asMs(d.timestamp) || parseUploadDate(d.upload_date),
-      thumbnail: d.thumbnail || (classified.type === 'youtube' ? ('https://i.ytimg.com/vi/' + classified.id + '/mqdefault.jpg') : ''),
-      pageUrl: classified.pageUrl,
-      videoUrl: vf.url,
-      audioUrl: af.url || vf.url,
-      videoHeaders: vf.http_headers || d.http_headers || null,
-      audioHeaders: af.http_headers || vf.http_headers || d.http_headers || null,
-      quality: q,
-      width: sized.width,
-      height: sized.height,
-      aspect: sized.aspect,
-      scale: sized.scale,
-      bitrate: bitrateForQuality(q),
-      dumpJson: dumpJson,
-    };
-  } else {
-    let result;
-    const grab = ['--print', printFmt, '-g', classified.pageUrl];
-    try {
-      result = await ytdlpRun(['-f', format].concat(grab), { timeout: 40000 });
-    } catch (e) {
-      result = await ytdlpRun(['-f', 'bv*+ba/b/best'].concat(grab), { timeout: 40000 });
-    }
-    const lines = result.stdout.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
-    const metaLine = lines.find(function (l) { return l.indexOf('|||') !== -1; }) || '';
-    const urls = lines.filter(function (l) { return /^https?:\/\//i.test(l); });
-    if (!urls.length) throw new Error('스트림 URL이 없습니다 (비공개/지역제한/오프라인일 수 있음)');
-    const parts = metaLine.split('|||');
-    const sized = sizeForQuality(q, parts[6], parts[7]);
-    info = {
-      type: classified.type,
-      id: parts[0] || classified.id,
-      title: parts[1] || classified.id,
-      duration: parseInt(parts[2], 10) || 0,
-      isLive: String(parts[3] || '').toLowerCase() === 'true' || String(parts[3] || '') === '1',
-      uploader: parts[4] || parts[9] || '',
-      channel: parts[9] || parts[4] || '',
-      channel_id: (parts[8] && parts[8] !== 'NA') ? parts[8] : '',
-      avatar: (parts[10] && parts[10] !== 'NA') ? parts[10] : '',
-      views: parseInt(parts[12], 10) || 0,
-      uploaded: asMs(parts[11]) || parseUploadDate(parts[13]),
-      thumbnail: parts[5] || (classified.type === 'youtube' ? ('https://i.ytimg.com/vi/' + classified.id + '/mqdefault.jpg') : ''),
-      pageUrl: classified.pageUrl,
-      videoUrl: urls[0],
-      audioUrl: urls[1] || urls[0],
-      videoHeaders: null,
-      audioHeaders: null,
-      quality: q,
-      width: sized.width,
-      height: sized.height,
-      aspect: sized.aspect,
-      scale: sized.scale,
-      bitrate: bitrateForQuality(q),
-    };
-  }
+  const metaLine = lines.find(function (l) { return l.indexOf('|||') !== -1; }) || '';
+  const urls = lines.filter(function (l) { return /^https?:\/\//i.test(l); });
+  if (!urls.length) throw new Error('스트림 URL이 없습니다 (비공개/지역제한/오프라인일 수 있음)');
 
-  if (dumpJson) info.dumpJson = dumpJson;
+  const parts = metaLine.split('|||');
+  const sized = sizeForQuality(q, parts[6], parts[7]);
+  const info = {
+    type: classified.type,
+    id: parts[0] || classified.id,
+    title: parts[1] || classified.id,
+    duration: parseInt(parts[2], 10) || 0,
+    isLive: String(parts[3] || '').toLowerCase() === 'true' || String(parts[3] || '') === '1',
+    uploader: parts[4] || parts[9] || '',
+    channel: parts[9] || parts[4] || '',
+    channel_id: (parts[8] && parts[8] !== 'NA') ? parts[8] : '',
+    avatar: (parts[10] && parts[10] !== 'NA') ? parts[10] : '',
+    views: parseInt(parts[12], 10) || 0,
+    uploaded: asMs(parts[11]) || parseUploadDate(parts[13]),
+    thumbnail: parts[5] || (classified.type === 'youtube' ? ('https://i.ytimg.com/vi/' + classified.id + '/mqdefault.jpg') : ''),
+    pageUrl: classified.pageUrl,
+    videoUrl: urls[0],
+    audioUrl: urls[1] || urls[0],
+    quality: q,
+    width: sized.width,
+    height: sized.height,
+    aspect: sized.aspect,
+    scale: sized.scale,
+    bitrate: bitrateForQuality(q),
+  };
+
   cacheSet(resolveCache, key, info);
   return info;
 }
@@ -544,11 +425,12 @@ async function fetchChannelMeta(idOrHandle) {
   const key = 'chmeta|' + url;
   const cached = cacheGet(searchCache, key, 10 * 60 * 1000);
   if (cached) return cached;
-  const result = await ytdlpRun([
+  const args = ytdlpArgs([
     '--playlist-end', '1',
     '--print', '%(channel_id)s|||%(channel)s|||%(uploader)s|||%(uploader_avatar_url)s|||%(channel_follower_count)s',
     url,
-  ], { timeout: 10000, playlist: true });
+  ], { playlist: true });
+  const result = await run(config.YT_DLP, args, { timeout: 10000 });
   const line = String(result.stdout || '').split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean)[0] || '';
   const p = line.split('|||');
   const ch = asChannel({
@@ -1172,14 +1054,14 @@ async function searchYoutube(query, limit, offset) {
 
   let items = [];
   try {
-    const result = await ytdlpRun(searchPrintArgs(n, q, off), { playlist: true, timeout: 12000 });
+    const result = await run(config.YT_DLP, ytdlpArgs(searchPrintArgs(n, q, off), { playlist: true }), { timeout: off ? 12000 : 12000 });
     items = parsePrintItems(result.stdout);
   } catch (e) {
     items = [];
   }
   if (!items.length && !off) {
     try {
-      const result = await ytdlpRun(searchPrintArgs(Math.min(n, 8), q, 0), { playlist: true, timeout: 10000 });
+      const result = await run(config.YT_DLP, ytdlpArgs(searchPrintArgs(Math.min(n, 8), q, 0), { playlist: true }), { timeout: 10000 });
       items = parsePrintItems(result.stdout);
     } catch (e2) {
       items = [];
@@ -1260,13 +1142,14 @@ async function youtubeRelated(id, title, limit, extra) {
 async function youtubeFeed(url, limit, timeout, offset) {
   const n = Math.min(Math.max(parseInt(limit, 10) || 24, 1), 40);
   const off = Math.max(0, parseInt(offset, 10) || 0);
-  const result = await ytdlpRun([
+  const args = ytdlpArgs([
     '--flat-playlist',
     '--playlist-start', String(off + 1),
     '--playlist-end', String(off + n),
     '--print', ITEM_PRINT,
     url,
-  ], { timeout: timeout || 10000, playlist: true });
+  ], { playlist: true });
+  const result = await run(config.YT_DLP, args, { timeout: timeout || 10000 });
   return parsePrintItems(result.stdout);
 }
 
@@ -1389,10 +1272,10 @@ async function twitchStatus(channel) {
   const ch = String(channel || '').replace(/[^a-zA-Z0-9_]/g, '');
   if (!ch) return { live: false, error: '채널 없음' };
   try {
-    const result = await ytdlpRun([
+    const result = await run(config.YT_DLP, ytdlpArgs([
       '--print', '%(title)s|||%(view_count)s|||%(is_live)s',
       'https://www.twitch.tv/' + ch,
-    ], { timeout: 18000 });
+    ]), { timeout: 18000 });
     const line = result.stdout.trim().split(/\r?\n/)[0] || '';
     const p = line.split('|||');
     const live = String(p[2] || '').toLowerCase() === 'true' || String(p[2] || '') === '1';
@@ -1420,7 +1303,6 @@ module.exports = {
   scaleForQuality,
   bitrateForQuality,
   resolveSource,
-  invalidateSource,
   searchYoutube,
   searchYoutubeWithChannels,
   youtubeHome,
@@ -1433,7 +1315,4 @@ module.exports = {
   stampItemAvatars,
   channelScore,
   twitchStatus,
-  ytdlpArgs,
-  formatForQuality,
-  stripBrokenFormats,
 };
