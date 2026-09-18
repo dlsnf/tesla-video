@@ -7,6 +7,7 @@ function run(cmd, args, opts) {
   const timeoutMs = opts.timeout || 25000;
   return new Promise(function (resolve, reject) {
     const child = spawn(cmd, args, {
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     });
@@ -17,7 +18,7 @@ function run(cmd, args, opts) {
     const timer = setTimeout(function () {
       if (done) return;
       done = true;
-      try { child.kill('SIGKILL'); } catch (e) {}
+      try { killTree(child); } catch (e) {}
       reject(new Error(cmd + ' timeout'));
     }, timeoutMs);
 

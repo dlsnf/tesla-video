@@ -429,8 +429,8 @@
     var ago = tv.fmtAgo(it.uploaded) || cleanName(it.published || '');
     var on = !!(it.id && favIds[it.id]);
     var chName = cardChannelName(it);
-    var html = '<div class="yt-card" data-id="' + escapeHtml(it.id || '') + '" data-url="' + (it.url || ('https://www.youtube.com/watch?v=' + it.id)) + '">';
-    html += '<div class="yt-thumb-wrap"><img src="' + (it.thumbnail || '') + '" alt="" loading="lazy" decoding="async">';
+    var html = '<div class="yt-card" data-id="' + escapeHtml(it.id || '') + '" data-url="' + escapeHtml(it.url || ('https://www.youtube.com/watch?v=' + it.id)) + '">';
+    html += '<div class="yt-thumb-wrap"><img src="' + escapeHtml(it.thumbnail || '') + '" alt="" loading="lazy" decoding="async">';
     html += '<button type="button" class="star-btn' + (on ? ' on' : '') + '" data-star="' + escapeHtml(it.id || '') + '" aria-label="즐겨찾기">';
     html += '<svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg></button>';
     if (dur) html += '<span class="yt-dur">' + dur + '</span>';

@@ -28,6 +28,8 @@ fs.writeFileSync(
 const sessions = new Map();
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
 const SESSION_FILE = path.join(config.DATA_DIR, 'sessions.json');
+const healthCache = { ts: 0, value: null, pending: null };
+const HEALTH_TTL = 30000;
 
 function loadSessions() {
   try {
@@ -145,6 +147,20 @@ app.get('/config.js', function (req, res) {
 });
 
 app.get('/api/health', async function (req, res) {
+  if (healthCache.value && Date.now() - healthCache.ts < HEALTH_TTL) {
+    return res.json(Object.assign({}, healthCache.value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  }
+  if (healthCache.pending) {
+    const value = await healthCache.pending;
+    return res.json(Object.assign({}, value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  }
+  healthCache.pending = (async function () {
   let ffmpegOk = false;
   let ytdlpOk = false;
   try {
@@ -155,18 +171,28 @@ app.get('/api/health', async function (req, res) {
     await run(config.YT_DLP, ['--version'], { timeout: 5000 });
     ytdlpOk = true;
   } catch (e) {}
-  res.json({
+  return {
     ok: ffmpegOk && ytdlpOk,
     ffmpeg: ffmpegOk,
     ytdlp: ytdlpOk,
-    streams: stream.activeCount(),
-    maxStreams: config.MAX_STREAMS,
     pin: true,
     base: config.PUBLIC_BASE || '/',
     youtubeOauth: !!(config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET),
     youtubeApi: !!config.GOOGLE_API_KEY,
     cookies: !!config.getCookiesFile(),
-  });
+  };
+  })();
+  try {
+    const value = await healthCache.pending;
+    healthCache.ts = Date.now();
+    healthCache.value = value;
+    res.json(Object.assign({}, value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  } finally {
+    healthCache.pending = null;
+  }
 });
 
 app.get('/api/auth/status', function (req, res) {
