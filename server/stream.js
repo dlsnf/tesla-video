@@ -63,8 +63,8 @@ function killProc(p) {
 
 function startYoutubePipe(info, start, format) {
   var formats = {
-    '134+140': '134+140/135+140/160+139/bestvideo[height<=360]+bestaudio/bestvideo+bestaudio',
-    '243+140': '243+140/134+140/160+139/bestvideo[height<=360]+bestaudio',
+    '134+140': '134+140/135+140/160+139/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
+    '243+140': '243+140/134+140/160+139/bestvideo[height<=360][vcodec^=vp9]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
   };
   const extra = [
     '-f', formats[format] || formats['134+140'],
@@ -441,6 +441,7 @@ function attachWsStream(ws, input, quality, start, extra) {
     var mpegSent = 0;
     var errBuf = '';
     var sourceRejectedSeen = false;
+    var sourceRefreshTimer = null;
     var SEND_CAP = 256 * 1024;
     var PENDING_CAP = 256 * 1024;
     function pauseOut() {
@@ -531,6 +532,14 @@ function attachWsStream(ws, input, quality, start, extra) {
             if (/403|forbidden|http error/i.test(s)) {
               sourceRejectedSeen = true;
               sendStatus(ws, 'YouTube 주소를 갱신하는 중...');
+              if (!sourceRefreshTimer) {
+                sourceRefreshTimer = setTimeout(function () {
+                  sourceRefreshTimer = null;
+                  if (closed || !cur._buddy) return;
+                  sendStatus(ws, '다시 연결하는 중...');
+                  try { killTree(cur._buddy); } catch (eRefresh) {}
+                }, 250);
+              }
             }
             errBuf += ' ' + s;
             if (errBuf.length > 1200) errBuf = errBuf.slice(-600);
@@ -573,6 +582,7 @@ function attachWsStream(ws, input, quality, start, extra) {
             mpegSent = 0;
             errBuf = '';
             sourceRejectedSeen = false;
+            if (sourceRefreshTimer) { clearTimeout(sourceRefreshTimer); sourceRefreshTimer = null; }
             pending = [];
             pendingBytes = 0;
             ffmpeg = startVideo(info, start, { format: extra && extra.format, legacySeek: legacySeek });

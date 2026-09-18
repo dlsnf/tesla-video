@@ -64,6 +64,7 @@
   var pipeTok = 0;
   var lastSyncRestart = 0;
   var lastDeadVideoRestart = 0;
+  var prerollRecoveryCount = 0;
   var lastSocketRestart = 0;
   var driftSince = 0;
   var driftAlerted = false;
@@ -1220,10 +1221,15 @@
   }
 
   function restartDeadVideoStream(reason, extra) {
-    if (ended || streamEnded || paused || (prerolling && !rebuffering) || !playing || !player) return;
+    if (ended || streamEnded || paused || !playing || !player) return;
     if (Date.now() - lastDeadVideoRestart < 15000) return;
+    if (prerolling && prerollRecoveryCount >= 1) {
+      failPreroll();
+      return;
+    }
     var sec = Math.max(0, (currentPos() || 0) - 0.5);
     lastDeadVideoRestart = Date.now();
+    if (prerolling) prerollRecoveryCount++;
     debugPlayback(reason || 'restart-dead-video', Object.assign({
       position: sec,
       videoTime: player && player.video ? player.video.currentTime : -1,
@@ -1234,7 +1240,7 @@
       audioAhead: audioAheadSec(),
       videoAhead: videoAheadSec()
     }, extra || {}));
-    playUrl(playing, sec, { skipInfo: true });
+    playUrl(playing, sec, { skipInfo: true, recovery: true });
   }
 
   function markCaughtUp() {
@@ -1812,9 +1818,11 @@
   }
 
   function playUrl(src, seek, opts) {
+    opts = opts || {};
+    if (!opts.recovery) prerollRecoveryCount = 0;
     var playSeq = beginReq();
-    var keepPaused = !!(opts && opts.keepPaused);
-    var skipInfo = !!(opts && opts.skipInfo) && duration > 0 && sameWatch(src);
+    var keepPaused = !!opts.keepPaused;
+    var skipInfo = !!opts.skipInfo && duration > 0 && sameWatch(src);
     preservedStageFrame = '';
     if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg on';
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain on';
@@ -2374,7 +2382,8 @@
       if (!prerolling && shouldRebuffer()) {
         beginRebuffer();
       }
-      if (!lastVideoDecodeAt && Date.now() - prerollAt > 8000 && netBytes > 4000) {
+      var firstFrameWait = startAt > 2 ? 30000 : 8000;
+      if (!lastVideoDecodeAt && Date.now() - prerollAt > firstFrameWait && netBytes > 4000) {
         restartDeadVideoStream('restart-no-video-first-frame');
         return;
       }
@@ -2403,7 +2412,9 @@
         }
         var readyA = pendingAudioSec(this.audioOut);
         var waited = prerollAt ? (Date.now() - prerollAt) : 0;
-        var readyV = this.video && (rebuffering ? rebufferVideoDecodeAt >= prerollAt : this.video.currentTime > 0);
+        var readyV = this.video && (rebuffering
+          ? rebufferVideoDecodeAt >= prerollAt
+          : (stageFrameReady && lastVideoDecodeAt >= prerollAt));
         var minA = rebuffering ? 0.8 : 0.3;
         var maxWait = rebuffering ? 20000 : 8000;
         var ready = (readyA >= need && readyV) || (waited > 4000 && readyV && readyA > 0.2) || (waited > maxWait && readyA > minA && readyV);
