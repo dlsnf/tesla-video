@@ -55,6 +55,9 @@ function killTree(child) {
   if (!child || !child.pid) return;
   var pid = child.pid;
   try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (eGroup) {}
+  try {
     var killer = spawn('pkill', ['-9', '-P', String(pid)], { stdio: 'ignore' });
     killer.on('error', function () {});
     if (killer.unref) killer.unref();

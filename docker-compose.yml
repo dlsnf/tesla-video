@@ -3,6 +3,7 @@ services:
     build: .
     container_name: tesla-video
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     ports:

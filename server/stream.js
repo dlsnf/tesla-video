@@ -46,7 +46,7 @@ function parseStart(v) {
 }
 
 function spawnFfmpeg(args) {
-  return spawn(config.FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawn(config.FFMPEG, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function killProc(p) {
@@ -61,9 +61,13 @@ function killProc(p) {
   try { if (p.pid) killTree(p); } catch (e1) {}
 }
 
-function startYoutubePipe(info, start) {
+function startYoutubePipe(info, start, format) {
+  var formats = {
+    '134+140': '134+140/135+140/160+139/bestvideo[height<=360]+bestaudio/bestvideo+bestaudio',
+    '243+140': '243+140/134+140/160+139/bestvideo[height<=360]+bestaudio',
+  };
   const extra = [
-    '-f', '134+140/135+140/160+139/bestvideo[height<=360]+bestaudio/bestvideo+bestaudio',
+    '-f', formats[format] || formats['134+140'],
     '--merge-output-format', 'mkv',
     '--no-part',
     '--no-progress',
@@ -75,7 +79,7 @@ function startYoutubePipe(info, start) {
   }
   extra.push(info.pageUrl || ('https://www.youtube.com/watch?v=' + (info.id || '')));
   var dlArgs = media.ytdlpArgs(extra, { client: 'default', cookies: false, ignoreErrors: false });
-  const ytdlp = spawn(config.YT_DLP, dlArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ytdlp = spawn(config.YT_DLP, dlArgs, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   swallowErr(ytdlp.stdout);
   swallowErr(ytdlp.stderr);
   const stdout = new PassThrough();
@@ -105,7 +109,7 @@ function startYoutubePipe(info, start) {
       '-i', 'pipe:0',
     ];
     Array.prototype.push.apply(ffArgs, encodeTs(info));
-    ffmpeg = spawn(config.FFMPEG, ffArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+    ffmpeg = spawn(config.FFMPEG, ffArgs, { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     swallowErr(ffmpeg.stdin);
     swallowErr(ffmpeg.stdout);
     swallowErr(ffmpeg.stderr);
@@ -302,7 +306,7 @@ function startTestAudio() {
 function startVideo(info, start, opts) {
   opts = opts || {};
   if (info.type === 'test') return startTestVideo(info);
-  if (info.type === 'youtube') return startYoutubePipe(info, start);
+  if (info.type === 'youtube') return startYoutubePipe(info, start, opts.format);
   const sk = seekParts(start, info.isLive);
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err'];
   if (info.audioUrl && info.audioUrl !== info.videoUrl) {
@@ -429,13 +433,14 @@ function attachWsStream(ws, input, quality, start, extra) {
     info.fps = extra && extra.fps === 30 ? 30 : 24;
     info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
     var encodeAttempt = 0;
-    ffmpeg = startVideo(info, start, { legacySeek: legacySeek });
+    ffmpeg = startVideo(info, start, { format: extra && extra.format, legacySeek: legacySeek });
     slot.kill = function () { killProc(ffmpeg); };
 
     var pending = [];
     var pendingBytes = 0;
     var mpegSent = 0;
     var errBuf = '';
+    var sourceRejectedSeen = false;
     var SEND_CAP = 256 * 1024;
     var PENDING_CAP = 256 * 1024;
     function pauseOut() {
@@ -505,6 +510,7 @@ function attachWsStream(ws, input, quality, start, extra) {
       });
       cur.stderr.on('data', function (d) {
         var text = d.toString();
+        if (/403|forbidden|http error/i.test(text)) sourceRejectedSeen = true;
         var tm = text.match(/time=([0-9:.]+)/g);
         if (tm && tm.length) {
           var raw = tm[tm.length - 1].replace(/^time=/, '').split(':');
@@ -522,6 +528,10 @@ function attachWsStream(ws, input, quality, start, extra) {
         cur._buddy.stderr.on('data', function (d) {
           var s = d.toString().replace(/\s+/g, ' ').trim();
           if (s) {
+            if (/403|forbidden|http error/i.test(s)) {
+              sourceRejectedSeen = true;
+              sendStatus(ws, 'YouTube 주소를 갱신하는 중...');
+            }
             errBuf += ' ' + s;
             if (errBuf.length > 1200) errBuf = errBuf.slice(-600);
             sendStatus(ws, s.slice(-180));
@@ -549,7 +559,7 @@ function attachWsStream(ws, input, quality, start, extra) {
           cleanup();
           return;
         }
-        var sourceRejected = /403|forbidden|http error/i.test(errBuf);
+        var sourceRejected = sourceRejectedSeen || /403|forbidden|http error/i.test(errBuf);
         var streamFailed = code != null && code !== 0;
         if ((mpegSent < 8000 || sourceRejected || streamFailed) && encodeAttempt < 2) {
           encodeAttempt += 1;
@@ -562,9 +572,10 @@ function attachWsStream(ws, input, quality, start, extra) {
             info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
             mpegSent = 0;
             errBuf = '';
+            sourceRejectedSeen = false;
             pending = [];
             pendingBytes = 0;
-            ffmpeg = startVideo(info, start, { legacySeek: legacySeek });
+            ffmpeg = startVideo(info, start, { format: extra && extra.format, legacySeek: legacySeek });
             slot.kill = function () { if (flushTimer) clearInterval(flushTimer); killProc(ffmpeg); };
             bindMpeg(ffmpeg);
           }).catch(function (e) {
@@ -633,7 +644,7 @@ function attachAudioStream(req, res, input, quality, start) {
     res.status(400).end();
     return;
   }
-  if (activeCount() > config.MAX_STREAMS) {
+  if (activeCount() >= config.MAX_STREAMS) {
     res.status(429).end();
     return;
   }
