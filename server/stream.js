@@ -550,7 +550,8 @@ function attachWsStream(ws, input, quality, start, extra) {
           return;
         }
         var sourceRejected = /403|forbidden|http error/i.test(errBuf);
-        if ((mpegSent < 8000 || sourceRejected) && encodeAttempt < 2) {
+        var streamFailed = code != null && code !== 0;
+        if ((mpegSent < 8000 || sourceRejected || streamFailed) && encodeAttempt < 2) {
           encodeAttempt += 1;
           try { media.invalidateSource(info && info.id); } catch (eInv) {}
           sendStatus(ws, parseStart(start) > 2 ? '지정한 위치부터 다시 받는 중...' : '다시 연결하는 중...');
