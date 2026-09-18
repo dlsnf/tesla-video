@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=136">
+<link rel="stylesheet" href="../css/app.css?v=139">
 </head>
 <body class="watch-loading">
 <div id="loadingCurtain" class="loading-curtain on" aria-hidden="true"></div>
@@ -127,6 +127,25 @@
       <td class="ch-sub-td"><button class="sub-btn" id="btnSub" type="button">구독</button></td>
     </tr>
   </table>
+  <section class="comments-box" id="commentsBox" style="display:none">
+    <button class="comments-preview" id="commentsPreview" type="button">
+      <span class="comments-preview-label">인기 댓글</span>
+      <span class="comments-preview-text" id="commentsPreviewText">댓글을 불러오는 중...</span>
+      <span class="comments-preview-arrow" aria-hidden="true">›</span>
+    </button>
+    <div class="comments-panel" id="commentsPanel" hidden>
+      <div class="comments-head">
+        <strong>댓글</strong>
+        <div class="comments-head-actions">
+          <button class="comment-sort on" data-comment-sort="top" aria-pressed="true" type="button">인기순</button>
+          <button class="comment-sort" data-comment-sort="new" aria-pressed="false" type="button">최신순</button>
+          <button class="comments-close" id="commentsClose" type="button" aria-label="댓글 닫기">닫기</button>
+        </div>
+      </div>
+      <div class="comments-list" id="commentsList"></div>
+      <div class="comments-state" id="commentsState"></div>
+    </div>
+  </section>
 
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
   <div class="chips" id="chips">
@@ -183,6 +202,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=133"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=153"></script>
+  <script src="../js/player.js?v=163"></script>
 </body>
 </html>
