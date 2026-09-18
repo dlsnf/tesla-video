@@ -8,6 +8,7 @@
   var bufEnd = 0;
   var paused = false, tickTimer = null, syncTimer = null, forceTimer = null, audioTimer = null;
   var pausePos = -1;
+  var pauseWall = 0;
   var pauseHeard = 0;
   var pauseUnread = -1;
   var resumeAt = 0;
@@ -46,6 +47,9 @@
   var videoShownAt = 0;
   var videoFrames = 0;
   var lastVideoDecodeAt = 0;
+  var lastFrameInterval = 0;
+  var lastOutputWatchAt = 0;
+  var outputGapSince = 0;
   var seeking = false;
   var seekPick = 0;
   var seekTouch = false;
@@ -59,8 +63,10 @@
   var pipeTok = 0;
   var lastSyncRestart = 0;
   var lastDeadVideoRestart = 0;
+  var lastSocketRestart = 0;
   var driftSince = 0;
   var driftAlerted = false;
+  var videoLeadSince = 0;
   var videoCatching = false;
   var useHttpAudio = false, videoStartWall = 0;
   var fsOn = false, tapHide = null, fsControlsTimer = null;
@@ -1243,6 +1249,15 @@
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
     if (!isFinite(vt)) return;
+    if (Date.now() - videoStartWall > 5000 && vt - heard > 0.5) {
+      if (!videoLeadSince) videoLeadSince = Date.now();
+      if (Date.now() - videoLeadSince >= 1200 && Date.now() - lastSyncRestart >= 12000) {
+        restartFromSound(true);
+        return;
+      }
+    } else if (vt <= heard + 0.25) {
+      videoLeadSince = 0;
+    }
     var drift = Math.abs(vt - heard);
     if (Date.now() - videoStartWall > 5000 && drift > 0.5) {
       if (!driftSince) driftSince = Date.now();
@@ -1301,6 +1316,47 @@
     if (ended || prerolling || paused || !player) return;
     videoCatching = true;
     skipVideoToSound(player);
+  }
+
+  function monitorOutputClocks() {
+    if (ended || prerolling || paused || !player || !videoStartWall) return;
+    var audioTime = playingSoundTime({ fallback: false });
+    var videoTime = player.video && isFinite(player.video.currentTime) ? player.video.currentTime : 0;
+    if (!(audioTime > 0) || !(videoTime >= 0)) return;
+    var now = Date.now();
+    var frameGap = lastVideoDecodeAt ? now - lastVideoDecodeAt : -1;
+    var drift = videoTime - audioTime;
+    if (frameGap > 900 && audioAheadSec() < 1.0) {
+      if (!outputGapSince) outputGapSince = now;
+      if (now - outputGapSince >= 1000) {
+        try {
+          console.warn('[tesla-video output] video frame gap while audio advances', {
+            frameGapMs: frameGap,
+            videoTime: videoTime,
+            audioTime: audioTime,
+            drift: drift,
+            frameIntervalMs: lastFrameInterval,
+            videoAhead: videoAheadSec(),
+            audioAhead: audioAheadSec(),
+          });
+        } catch (eWarn) {}
+      }
+    } else if (frameGap >= 0 && frameGap < 400) {
+      outputGapSince = 0;
+    }
+    if (playbackDebug && now - lastOutputWatchAt >= 2000) {
+      lastOutputWatchAt = now;
+      debugPlayback('output-clock-watch', {
+        videoTime: videoTime,
+        audioTime: audioTime,
+        drift: drift,
+        frameGapMs: frameGap,
+        frameIntervalMs: lastFrameInterval,
+        videoAhead: videoAheadSec(),
+        audioAhead: audioAheadSec(),
+        queuedAudio: queuedAudio(),
+      });
+    }
   }
 
   function clearResumeSync() {
@@ -1471,6 +1527,7 @@
     needStreamRestart = false;
     driftSince = 0;
     driftAlerted = false;
+    videoLeadSince = 0;
     videoCatching = false;
     paused = true;
     pausePos = duration > 0 ? duration : currentPos();
@@ -1547,7 +1604,7 @@
     return false;
   }
 
-  function restartFromSound() {
+  function restartFromSound(force) {
     if (ended || streamEnded || paused || !playing || isLive || soundResyncing) return;
     if (Date.now() - lastSyncRestart < 12000) return;
     var src = playing;
@@ -1557,7 +1614,7 @@
     var videoAhead = videoAheadSec();
     var packed = packedAhead();
     var queued = queuedAudio();
-    if (audioAhead > 1.0 || videoAhead > 1.0 || packed > 2.0 || queued > 0.8) {
+    if (!force && (audioAhead > 1.0 || videoAhead > 1.0 || packed > 2.0 || queued > 0.8)) {
       debugPlayback('restartFromSound-skip-buffer-present', {
         position: sec,
         heard: playingSoundTime({ fallback: false }),
@@ -1690,6 +1747,7 @@
     updateRepeatButton();
     playing = null;
     paused = false;
+    pauseWall = 0;
     pausePos = -1;
     pauseHeard = 0;
     lastHeard = 0;
@@ -2004,6 +2062,7 @@
     videoStartWall = 0;
     driftSince = 0;
     driftAlerted = false;
+    videoLeadSince = 0;
     unlockAudio();
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     launchPlayer(wsUrlFor(src, startAt, startAt > 2));
@@ -2088,6 +2147,7 @@
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
     syncTimer = setInterval(function () {
       if (!playing || paused) return;
+      monitorOutputClocks();
       requestSoundSync();
     }, 2000);
 
@@ -2215,7 +2275,7 @@
     updateStageLoader('');
     rebuffering = false;
     streamRetry = 0;
-    if (startAt > 1) seekSettleUntil = Date.now() + 2500;
+    seekSettleUntil = 0;
     try {
       var ctx = out.context;
       var now = ctx ? ctx.currentTime : 0;
@@ -2400,7 +2460,11 @@
     videoShownAt = 0;
     videoFrames = 0;
     lastVideoDecodeAt = 0;
+    lastFrameInterval = 0;
+    lastOutputWatchAt = 0;
+    outputGapSince = 0;
     videoCatching = false;
+    lastSocketRestart = 0;
     seekSettleUntil = 0;
     lastHeard = 0;
     resumeHeard = 0;
@@ -2445,15 +2509,19 @@
         pauseWhenHidden: false,
         preserveDrawingBuffer: false,
         disableWebAudio: false,
-        onSourceCompleted: function () { markStreamEnded(); },
+        onSourceCompleted: function () {
+          if (isLive || nearEnd() || streamEnded) markStreamEnded();
+        },
         onVideoDecode: function () {
+          var decodeNow = Date.now();
+          if (lastVideoDecodeAt) lastFrameInterval = decodeNow - lastVideoDecodeAt;
           var frame = $('stageFrame');
           if (frame) frame.className = 'stage-frame';
           var loadingBg = $('stageLoadingBg');
           if (loadingBg) loadingBg.className = 'stage-loading-bg';
           if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
           preservedStageFrame = '';
-          lastVideoDecodeAt = Date.now();
+          lastVideoDecodeAt = decodeNow;
           if (!videoStartWall) {
             videoStartWall = Date.now();
             clock0 = Date.now();
@@ -2578,6 +2646,18 @@
           return;
         }
         failPreroll(lastStreamErr || '지정한 위치로 이동하지 못했습니다. 다시 눌러 보세요.');
+        return;
+      }
+      if (!ended && playing && !paused && !streamEnded && !nearEnd()) {
+        if (Date.now() - lastSocketRestart >= 12000) {
+          lastSocketRestart = Date.now();
+          var resumeSec = Math.max(0, currentPos() - 0.5);
+          setStatus('네트워크가 끊겨 재연결하는 중...');
+          setTimeout(function () {
+            if (gen !== streamGen || !playing || paused || ended || streamEnded) return;
+            playUrl(playing, resumeSec, { skipInfo: true });
+          }, 350);
+        }
         return;
       }
       if (!ended && playing && (streamEnded || nearEnd())) markStreamEnded();
@@ -2746,6 +2826,7 @@
       }
       if (pauseHeard > 0) lastHeard = pauseHeard;
       paused = true;
+      pauseWall = Date.now();
       holdPlayback();
       applyStreamHold();
       if (na) { try { na.pause(); } catch (e) {} }
@@ -2759,6 +2840,23 @@
       $('btnPause').textContent = '일시정지';
       flashTap('❚❚');
       applyChrome();
+      if (pauseWall && Date.now() - pauseWall > 500 && playing) {
+        var resumeSec = pausePos >= 0 ? pausePos : currentPos();
+        pauseWall = 0;
+        pausePos = -1;
+        playUrl(playing, resumeSec, { skipInfo: true });
+        paintSeekBar();
+        return;
+      }
+      pauseWall = 0;
+      var socket = streamSocket();
+      if (!socket || socket.readyState !== 1) {
+        var reconnectSec = pausePos >= 0 ? pausePos : startAt;
+        pausePos = -1;
+        playUrl(playing, reconnectSec, { skipInfo: true });
+        paintSeekBar();
+        return;
+      }
       if (!player) {
         var resumeSec = pausePos >= 0 ? pausePos : startAt;
         pausePos = -1;
@@ -2841,6 +2939,12 @@
     applyChrome();
     setTimeout(fitStage, 0);
     setTimeout(fitStage, 80);
+    setTimeout(function () {
+      if (!playing || ended) return;
+      unlockPlaybackAudio();
+      requestSoundSync();
+      scheduleResumeSync(0);
+    }, 120);
   }
 
   function toggleFsControls() {
