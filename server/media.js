@@ -7,6 +7,7 @@ const { run } = require('./proc');
 
 const resolveCache = new Map();
 const searchCache = new Map();
+const commentCache = new Map();
 const RESOLVE_TTL = 5 * 60 * 1000;
 const SEARCH_TTL = 8 * 60 * 1000;
 const inflight = new Map();
@@ -18,6 +19,9 @@ setInterval(function () {
   });
   searchCache.forEach(function (entry, key) {
     if (!entry || now - entry.ts > SEARCH_TTL) searchCache.delete(key);
+  });
+  commentCache.forEach(function (entry, key) {
+    if (!entry || now - entry.ts > SEARCH_TTL) commentCache.delete(key);
   });
 }, 60 * 1000).unref();
 
@@ -39,7 +43,8 @@ function ytdlpArgs(extra, opts) {
     '--socket-timeout', '12',
     '--js-runtimes', 'node:' + process.execPath,
     '--add-header', 'Accept-Language:ko-KR,ko;q=0.9,en;q=0.3',
-    '--extractor-args', 'youtube:player_client=' + client + ';lang=ko',
+    '--extractor-args', 'youtube:player_client=' + client + ';lang=ko'
+      + (opts.commentLimit ? ';comment_sort=' + (opts.commentSort === 'new' ? 'new' : 'top') + ';max_comments=' + String(opts.commentLimit) : ''),
   ];
   if (opts.ignoreErrors !== false) args.push('--ignore-errors');
   if (!opts.playlist) args.unshift('--no-playlist');
@@ -65,6 +70,8 @@ async function ytdlpRun(extra, opts) {
         playlist: playlist,
         client: tries[i].client,
         cookies: tries[i].cookies,
+        commentLimit: opts.commentLimit,
+        commentSort: opts.commentSort,
       }), { timeout: timeout });
     } catch (e) {
       last = e;
@@ -553,6 +560,7 @@ function asChannel(ch) {
     name: (cleanMeta(ch.name || ch.uploader || ch.channel || '') || id).slice(0, 120),
     thumbnail: String(ch.thumbnail || ch.avatar || '').slice(0, 400),
     avatar: String(ch.avatar || ch.thumbnail || '').slice(0, 400),
+    subscribers: parseKoViews(ch.subscribers || ch.subscriber_count || ch.channel_follower_count || ch.subscriberCountText || 0),
   };
 }
 
@@ -593,6 +601,7 @@ async function fetchChannelMeta(idOrHandle) {
     channel_id: p[0],
     name: p[1] || p[2],
     avatar: (p[3] && p[3] !== 'NA') ? p[3] : '',
+    channel_follower_count: p[4],
   });
   if (!ch) return null;
   cacheSet(searchCache, key, ch);
@@ -748,12 +757,15 @@ function parseLen(s) {
 
 function parseKoViews(s) {
   const t = String(s || '').replace(/,/g, '');
-  const m = t.match(/([\d.]+)\s*(억|만|천)?/);
+  const m = t.match(/([\d.]+)\s*(억|만|천|[KMB])?/i);
   if (!m) return 0;
   var n = parseFloat(m[1]) || 0;
   if (m[2] === '억') n *= 1e8;
   else if (m[2] === '만') n *= 1e4;
   else if (m[2] === '천') n *= 1e3;
+  else if (m[2] === 'B' || m[2] === 'b') n *= 1e9;
+  else if (m[2] === 'M' || m[2] === 'm') n *= 1e6;
+  else if (m[2] === 'K' || m[2] === 'k') n *= 1e3;
   return Math.round(n);
 }
 
@@ -915,6 +927,7 @@ function mapInnertubeChannel(c) {
     channel_id: c.channelId || '',
     name: textOf(c.title),
     avatar: pickThumbUrl((c.thumbnail || {}).thumbnails),
+    subscriberCountText: textOf(c.subscriberCountText),
   });
 }
 
@@ -1010,6 +1023,7 @@ async function innertubeChannelMeta(idOrHandle) {
     channel_id: parsed.channel_id || (String(browseId).indexOf('UC') === 0 ? browseId : '') || raw,
     name: parsed.name,
     avatar: parsed.avatar,
+    subscriberCountText: findNestedString(json, function (s) { return /구독자|subscriber/i.test(String(s)); }, 0),
   });
   if (!ch) return null;
   if (ch.avatar) cacheSet(searchCache, key, ch);
@@ -1023,7 +1037,7 @@ function looksAvatar(url) {
 async function fillChannelAvatars(channels) {
   const list = (channels || []).slice(0, 6);
   await Promise.all(list.map(async function (ch) {
-    if (!ch || looksAvatar(ch.avatar || ch.thumbnail)) return;
+    if (!ch || (looksAvatar(ch.avatar || ch.thumbnail) && ch.subscribers > 0)) return;
     try {
       const meta = await Promise.race([
         (async function () {
@@ -1043,6 +1057,7 @@ async function fillChannelAvatars(channels) {
         ch.thumbnail = meta.avatar;
         if (meta.name) ch.name = meta.name;
       }
+      if (meta && meta.subscribers > 0) ch.subscribers = meta.subscribers;
     } catch (e) {}
   }));
   return channels || [];
@@ -1295,6 +1310,63 @@ async function youtubeRelated(id, title, limit, extra) {
   return out.slice(0, n);
 }
 
+async function youtubeComments(id, limit, offset, sort) {
+  const vid = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 11);
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(vid)) return { items: [], more: false };
+  const n = Math.min(Math.max(parseInt(limit, 10) || 1, 1), 20);
+  const off = Math.max(0, parseInt(offset, 10) || 0);
+  const descending = sort !== 'top-asc' && sort !== 'new-asc';
+  const order = sort === 'new' || sort === 'new-asc' ? 'new' : 'top';
+  const key = 'comments|' + sort + '|' + vid;
+  let comments = cacheGet(commentCache, key, SEARCH_TTL);
+  if (!comments || comments.length <= off + n) {
+    const result = await ytdlpRun([
+      '--write-comments',
+      '-J',
+      'https://www.youtube.com/watch?v=' + vid,
+    ], { timeout: 60000, commentLimit: Math.min(Math.max(off + n + 20, 20), 100), commentSort: order });
+    const data = parseJsonBlob(result.stdout) || {};
+    comments = (Array.isArray(data.comments) ? data.comments : []).map(function (item) {
+      if (!item) return null;
+      const rawLikes = item.like_count != null ? item.like_count
+        : (item.likeCount != null ? item.likeCount
+          : (item.likes != null ? item.likes
+            : (item.like_count_text != null ? item.like_count_text
+              : (item.likeCountText != null ? item.likeCountText
+                : (item.vote_count != null ? item.vote_count : item.voteCount)))));
+      const likesText = rawLikes && typeof rawLikes === 'object' ? textOf(rawLikes) : rawLikes;
+      const likesString = String(likesText == null ? '' : likesText).replace(/,/g, '').trim();
+      const likes = likesString ? parseKoViews(likesString) : null;
+      var rawTime = item.timestamp || item.time || item.comment_time || item.published_at;
+      var time = parseInt(rawTime, 10) || 0;
+      if (time > 100000000000) time = Math.floor(time / 1000);
+      if (!time && rawTime) {
+        var parsedTime = Date.parse(String(rawTime));
+        if (isFinite(parsedTime)) time = Math.floor(parsedTime / 1000);
+      }
+      return {
+        id: String(item.id || '').slice(0, 120),
+        author: String(item.author || item.uploader || 'YouTube 사용자').slice(0, 120),
+        avatar: String(item.author_thumbnail || '').slice(0, 500),
+        text: String(item.text || '').slice(0, 2000),
+        likes: likes,
+        time: time,
+        timeText: String(item.time_text || item.published || item.published_time || item.comment_time_text || '').slice(0, 80),
+      };
+    }).filter(function (item) { return item && item.text; });
+    comments.sort(function (a, b) {
+      var result = order === 'new' ? (b.time || 0) - (a.time || 0) : (b.likes || 0) - (a.likes || 0);
+      return descending ? result : -result;
+    });
+    cacheSet(commentCache, key, comments);
+  }
+  return {
+    items: comments.slice(off, off + n),
+    more: comments.length > off + n,
+    total: comments.length,
+  };
+}
+
 async function youtubeFeed(url, limit, timeout, offset) {
   const n = Math.min(Math.max(parseInt(limit, 10) || 24, 1), 40);
   const off = Math.max(0, parseInt(offset, 10) || 0);
@@ -1463,6 +1535,7 @@ module.exports = {
   searchYoutubeWithChannels,
   youtubeHome,
   youtubeRelated,
+  youtubeComments,
   youtubeSubscriptions,
   youtubeChannelVideos,
   subscriptionFeed,

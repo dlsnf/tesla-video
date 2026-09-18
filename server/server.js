@@ -502,10 +502,12 @@ app.get('/api/youtube/search', async function (req, res) {
         name: ch.name || ch.uploader || ch.channel_id,
         thumbnail: ch.thumbnail || ch.avatar || '',
         avatar: ch.avatar || ch.thumbnail || '',
+        subscribers: parseInt(ch.subscribers, 10) || 0,
       });
     }
     preferred.forEach(addCh);
     (data.channels || []).forEach(addCh);
+    await media.fillChannelAvatars(channels);
     const found = data.items || [];
     res.json({ ok: true, items: found, channels: channels, more: found.length >= Math.min(parseInt(req.query.limit, 10) || 16, 16) });
   } catch (e) {
@@ -560,6 +562,19 @@ app.get('/api/youtube/related', async function (req, res) {
     res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(n, 8)) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/youtube/comments', async function (req, res) {
+  try {
+    const id = String(req.query.id || '');
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1, 1), 20);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const sort = /^(?:top|new)(?:-asc)?$/.test(req.query.sort || '') ? req.query.sort : 'top';
+    const data = await media.youtubeComments(id, limit, offset, sort);
+    res.json({ ok: true, items: data.items, more: data.more, total: data.total || 0 });
+  } catch (e) {
+    res.status(200).json({ ok: false, items: [], more: false, error: e.message.slice(0, 180) });
   }
 });
 

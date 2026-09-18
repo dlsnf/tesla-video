@@ -38,6 +38,7 @@
   var repeatAt = 0;
 
   function updateRepeatButton() {
+  if (commentsOffset === 0 && list) list.innerHTML = '';
     var button = $('btnRepeat');
     if (!button) return;
     button.classList.toggle('on', repeatEnabled);
@@ -104,9 +105,178 @@
   var subPending = {};
   var subWant = {};
   var subTapAt = {};
+  var commentsId = '';
+  var commentsOffset = 0;
+  var commentsMore = false;
+  var commentsLoading = false;
+  var commentsOpened = false;
+  var commentsSort = 'top';
+  var commentsCache = { top: [], new: [] };
+  var commentsPrefetching = { top: false, new: false };
+  var commentsRequestSeq = 0;
 
   function beginReq() { return ++reqSeq; }
   function stillReq(seq) { return seq === reqSeq; }
+
+  function commentTime(ts, text) {
+    if (!ts) return String(text || '작성 시간 확인 불가');
+    ts = Number(ts) || 0;
+    if (ts > 100000000000) ts /= 1000;
+    var diff = Math.max(0, Date.now() - ts * 1000);
+    var min = Math.floor(diff / 60000);
+    if (min < 1) return '방금';
+    if (min < 60) return min + '분 전';
+    var hour = Math.floor(min / 60);
+    if (hour < 24) return hour + '시간 전';
+    return Math.floor(hour / 24) + '일 전';
+  }
+
+  function commentHtml(item) {
+    var meta = '';
+    var when = commentTime(item.time, item.timeText);
+    if (when) meta = when;
+    var author = item.author || 'YouTube 사용자';
+    var initial = escapeHtml(author.charAt(0) || '?');
+    var avatar = item.avatar
+      ? '<img src="' + escapeHtml(item.avatar) + '" alt="" referrerpolicy="no-referrer">'
+      : '<span>' + initial + '</span>';
+    return '<article class="comment-item"><div class="comment-avatar">' + avatar + '</div><div class="comment-body">'
+      + '<div class="comment-author">' + escapeHtml(author) + '<span class="comment-meta">' + escapeHtml(meta) + '</span></div>'
+      + '<div class="comment-text">' + escapeHtml(item.text || '') + '</div>'
+      + '<div class="comment-actions"><button type="button" aria-label="좋아요"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10v10H4V10h3zm3 10h7.2c.8 0 1.5-.5 1.8-1.3l1.5-5.2c.3-1-.5-2-1.5-2H14l.7-3.4.1-.6c0-.4-.2-.8-.5-1.1L13 5l-5 5v10h2z"/></svg></button>'
+      + '<span class="comment-like-count">' + escapeHtml(item.likes == null ? '확인 불가' : String(item.likes)) + '</span><button type="button" aria-label="싫어요"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 14V4h3v10h-3zm-3-10H6.8C6 4 5.3 4.5 5 5.3l-1.5 5.2c-.3 1 .5 2 1.5 2H10l-.7 3.4-.1.6c0 .4.2.8.5 1.1L11 19l5-5V4h-2z"/></svg></button><button class="comment-reply" type="button">답글</button></div>'
+      + '</div></article>';
+  }
+
+  function setCommentsState(text, loading) {
+    var state = $('commentsState');
+    if (!state) return;
+    state.textContent = text || '';
+    state.className = 'comments-state' + (loading ? ' loading' : '');
+  }
+
+  function updateCommentSortButtons() {
+    var buttons = document.querySelectorAll('[data-comment-sort]');
+    var activeKind = (commentsSort === 'new' || commentsSort === 'new-asc') ? 'new' : 'top';
+    var ascActive = commentsSort === 'top-asc' || commentsSort === 'new-asc';
+    for (var i = 0; i < buttons.length; i++) {
+      var base = buttons[i].getAttribute('data-comment-sort');
+      var selected = base === activeKind;
+      buttons[i].className = 'comment-sort' + (selected ? ' on' : '');
+      buttons[i].textContent = base === 'top'
+        ? (selected && ascActive ? '비인기순' : '인기순')
+        : (selected && ascActive ? '과거순' : '최신순');
+      buttons[i].setAttribute('aria-pressed', selected ? 'true' : 'false');
+    }
+  }
+
+  function resetComments(id, type) {
+    commentsId = type === 'youtube' ? String(id || '') : '';
+    commentsOffset = 0;
+    commentsMore = false;
+    commentsLoading = false;
+    commentsOpened = false;
+    commentsSort = 'top';
+    commentsCache = { top: [], new: [] };
+    commentsPrefetching = { top: false, new: false };
+    commentsRequestSeq++;
+    updateCommentSortButtons();
+    var box = $('commentsBox');
+    var panel = $('commentsPanel');
+    var list = $('commentsList');
+    if (box) box.style.display = commentsId ? 'block' : 'none';
+    if (panel) panel.hidden = true;
+    if (list) list.innerHTML = '';
+    if ($('commentsPreviewText')) $('commentsPreviewText').textContent = commentsId ? '댓글을 불러오는 중...' : '';
+    setCommentsState('', false);
+    if (commentsId) loadComments(1, true);
+  }
+
+  function loadComments(limit, previewOnly) {
+    if (!commentsId || commentsLoading) return;
+    var requestSeq = ++commentsRequestSeq;
+    commentsLoading = true;
+    var state = $('commentsState');
+    if (!previewOnly) setCommentsState('댓글을 불러오는 중...', true);
+    tv.get('/api/youtube/comments?id=' + encodeURIComponent(commentsId) + '&limit=' + (limit || 10) + '&offset=' + commentsOffset + '&sort=' + commentsSort, function (code, data) {
+      if (requestSeq !== commentsRequestSeq) return;
+      commentsLoading = false;
+      if (!data || !data.ok) {
+        if (previewOnly && $('commentsPreviewText')) $('commentsPreviewText').textContent = '댓글을 불러오지 못했습니다';
+        setCommentsState('댓글을 불러오지 못했습니다', false);
+        return;
+      }
+      var items = data.items || [];
+      if (previewOnly) {
+        if ($('commentsPreviewText')) $('commentsPreviewText').textContent = items[0] ? ((items[0].author || '사용자') + ' · ' + items[0].text) : '댓글이 없습니다';
+        commentsMore = !!data.more;
+        if (commentsOpened && $('commentsList') && !$('commentsList').children.length) loadComments(10, false);
+        return;
+      }
+      if (commentsOffset === 0) commentsCache[commentsSort] = [];
+      commentsCache[commentsSort] = commentsCache[commentsSort].concat(items);
+      var list = $('commentsList');
+      if (list) {
+        for (var i = 0; i < items.length; i++) list.insertAdjacentHTML('beforeend', commentHtml(items[i]));
+      }
+      commentsOffset += items.length;
+      commentsMore = !!data.more;
+      setCommentsState(commentsMore ? '아래로 내리면 더 불러옵니다' : (commentsOffset ? '댓글 끝' : '댓글이 없습니다'), false);
+    });
+  }
+
+  function openComments() {
+    if (!commentsId) return;
+    commentsOpened = true;
+    var panel = $('commentsPanel');
+    if (panel) panel.hidden = false;
+    if (!$('commentsList') || !$('commentsList').children.length) loadComments(10, false);
+    prefetchComments('new');
+  }
+
+  function closeComments() {
+    commentsOpened = false;
+    var panel = $('commentsPanel');
+    if (panel) panel.hidden = true;
+  }
+
+  function setCommentSort(sort) {
+    var kind = sort === 'new' ? 'new' : 'top';
+    if (!commentsOpened) return;
+    commentsSort = commentsSort === kind ? kind + '-asc' : kind;
+    commentsRequestSeq++;
+    commentsLoading = false;
+    commentsOffset = 0;
+    commentsMore = false;
+    updateCommentSortButtons();
+    if ($('commentsList')) $('commentsList').scrollTop = 0;
+    setCommentsState('댓글 정렬 중...', true);
+    if (commentsPrefetching[kind] && commentsSort === kind) return;
+    if (commentsCache[commentsSort] && commentsCache[commentsSort].length) {
+      commentsOffset = commentsCache[commentsSort].length;
+      if ($('commentsList')) $('commentsList').innerHTML = commentsCache[commentsSort].map(commentHtml).join('');
+      commentsMore = true;
+      setCommentsState('아래로 내리면 더 불러옵니다', false);
+      return;
+    }
+    loadComments(10, false);
+  }
+
+  function prefetchComments(sort) {
+    if (!commentsId || commentsPrefetching[sort] || commentsCache[sort].length) return;
+    commentsPrefetching[sort] = true;
+    tv.get('/api/youtube/comments?id=' + encodeURIComponent(commentsId) + '&limit=20&offset=0&sort=' + sort, function (code, data) {
+      commentsPrefetching[sort] = false;
+      if (!data || !data.ok) return;
+      commentsCache[sort] = data.items || [];
+      if (commentsOpened && (commentsSort === sort || commentsSort === sort + '-asc') && $('commentsList')) {
+        commentsOffset = commentsCache[sort].length;
+        commentsMore = !!data.more;
+        $('commentsList').innerHTML = commentsCache[sort].map(commentHtml).join('');
+        setCommentsState(commentsMore ? '아래로 내리면 더 불러옵니다' : '댓글 끝', false);
+      }
+    });
+  }
 
   function isBotErr(s) {
     return /봇이 아님|not a bot|Sign in to confirm|봇으로 차단|페이지를 새로고침해야|page needs to be reloaded|Forbidden|403|format is not available/i.test(String(s || ''));
@@ -423,6 +593,14 @@
     return name;
   }
 
+  function formatSubscribers(value) {
+    var n = parseInt(value, 10) || 0;
+    if (n < 1000) return n ? (n + '명') : '';
+    if (n < 10000) return (Math.round(n / 100) / 10).toString().replace(/\.0$/, '') + '천명';
+    if (n < 100000000) return (Math.round(n / 1000) / 10).toString().replace(/\.0$/, '') + '만명';
+    return (Math.round(n / 1000000) / 100).toString().replace(/\.0+$/, '') + '억명';
+  }
+
   function cardHtml(it) {
     var dur = tv.fmtDur(it.duration);
     var views = tv.fmtViews(it.views);
@@ -540,7 +718,7 @@
       html += '<td class="ch-hit-main" data-ch="' + escapeHtml(id) + '">';
       html += '<div class="ch-hit-av" data-chid="' + escapeHtml(id) + '" data-chname="' + escapeHtml(chName) + '">' + avatarInner(avatarFor(ch) || ch.thumbnail || ch.avatar || '', chName) + '</div>';
       html += '<div class="ch-hit-meta"><div class="ch-hit-name">' + escapeHtml(chName) + '</div>';
-      html += '<div class="ch-hit-sub">채널</div></div></td>';
+      html += '<div class="ch-hit-sub">채널' + (formatSubscribers(ch.subscribers) ? ' · 구독자 ' + escapeHtml(formatSubscribers(ch.subscribers)) : '') + '</div></div></td>';
       html += '<td class="ch-hit-action" data-sub="' + escapeHtml(id) + '" data-subname="' + escapeHtml(chName) + '">';
       html += '<span class="sub-btn' + (on ? ' on' : '') + '">' + (on ? '구독중' : '구독') + '</span>';
       html += '</td></tr></table>';
@@ -1913,6 +2091,7 @@
         thumbnail: info.avatar || info.thumbnail || '',
         avatar: info.avatar || ''
       };
+      resetComments(info.id, info.type);
       if ($('chName')) $('chName').textContent = watchChannel.name || watchChannel.channel_id || '';
       rememberAvatars([watchChannel]);
       paintWatchStar();
@@ -3103,6 +3282,16 @@
   };
   if ($('btnStop')) $('btnStop').onclick = function () { stop(false); setStatus('정지'); };
   if ($('btnPause')) $('btnPause').onclick = togglePause;
+  if ($('commentsPreview')) $('commentsPreview').onclick = openComments;
+  if ($('commentsClose')) $('commentsClose').onclick = closeComments;
+  var commentSortButtons = document.querySelectorAll('[data-comment-sort]');
+  for (var csi = 0; csi < commentSortButtons.length; csi++) {
+    commentSortButtons[csi].onclick = function () { setCommentSort(this.getAttribute('data-comment-sort')); };
+  }
+  if ($('commentsList')) $('commentsList').onscroll = function () {
+    if (!commentsOpened || !commentsMore || commentsLoading) return;
+    if (this.scrollTop + this.clientHeight >= this.scrollHeight - 120) loadComments(10, false);
+  };
   if ($('btnRepeat')) $('btnRepeat').onclick = function () {
     repeatEnabled = !repeatEnabled;
     updateRepeatButton();
