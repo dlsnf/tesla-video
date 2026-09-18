@@ -1,7 +1,7 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var stage = $('stage'), na = $('na'), st = $('st'), list = $('list');
-  var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, startAt = 0;
+  var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, streamFormat = '243+140', startAt = 0;
   var preservedStageFrame = '';
   var stageFrameReady = false, stagePrerollReady = false;
   var duration = 0, isLive = false, clock0 = 0, fpsCount = 0, lastFps = 0;
@@ -47,6 +47,7 @@
   var videoShownAt = 0;
   var videoFrames = 0;
   var lastVideoDecodeAt = 0;
+  var rebufferVideoDecodeAt = 0;
   var lastFrameInterval = 0;
   var lastOutputWatchAt = 0;
   var outputGapSince = 0;
@@ -1219,7 +1220,7 @@
   }
 
   function restartDeadVideoStream(reason, extra) {
-    if (ended || streamEnded || paused || prerolling || !playing || !player) return;
+    if (ended || streamEnded || paused || (prerolling && !rebuffering) || !playing || !player) return;
     if (Date.now() - lastDeadVideoRestart < 15000) return;
     var sec = Math.max(0, (currentPos() || 0) - 0.5);
     lastDeadVideoRestart = Date.now();
@@ -1249,9 +1250,9 @@
     if (!(heard > 0)) return;
     var vt = pl.video.currentTime;
     if (!isFinite(vt)) return;
-    if (Date.now() - videoStartWall > 5000 && vt - heard > 0.5) {
+    if (Date.now() - videoStartWall > 3000 && vt - heard > 0.12) {
       if (!videoLeadSince) videoLeadSince = Date.now();
-      if (Date.now() - videoLeadSince >= 1200 && Date.now() - lastSyncRestart >= 12000) {
+      if (Date.now() - videoLeadSince >= 300 && Date.now() - lastSyncRestart >= 12000) {
         restartFromSound(true);
         return;
       }
@@ -1959,7 +1960,7 @@
   }
 
   function wsUrlFor(src, start, refresh, legacy) {
-    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : ''));
+    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&format=' + encodeURIComponent(streamFormat) + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : ''));
   }
 
   function startHttpAudio(src) {
@@ -2320,6 +2321,7 @@
     });
     prerolling = true;
     rebuffering = true;
+    rebufferVideoDecodeAt = 0;
     prerollAt = Date.now();
     sendStreamCtrl(false);
     setStatus('불러오는 중');
@@ -2391,17 +2393,17 @@
         }
         if (this.video) {
           var vt0 = this.video.currentTime;
-          if (!isFinite(vt0) || vt0 <= 0.001) {
+          if (rebuffering || !isFinite(vt0) || vt0 <= 0.001) {
             var vd = 0;
-            while (vd < 12 && (!isFinite(this.video.currentTime) || this.video.currentTime <= 0.001)) {
+            while (vd < 12 && (rebuffering ? !rebufferVideoDecodeAt : (!isFinite(this.video.currentTime) || this.video.currentTime <= 0.001))) {
               vd++;
               if (!this.video.decode()) break;
             }
           }
         }
         var readyA = pendingAudioSec(this.audioOut);
-        var readyV = this.video && this.video.currentTime > 0;
         var waited = prerollAt ? (Date.now() - prerollAt) : 0;
+        var readyV = this.video && (rebuffering ? rebufferVideoDecodeAt >= prerollAt : this.video.currentTime > 0);
         var minA = rebuffering ? 0.8 : 0.3;
         var maxWait = rebuffering ? 20000 : 8000;
         var ready = (readyA >= need && readyV) || (waited > 4000 && readyV && readyA > 0.2) || (waited > maxWait && readyA > minA && readyV);
@@ -2421,6 +2423,14 @@
           }
           if (rebuffering && waited > 8000 && nearEnd() && supplyDrained()) {
             finishPlayback();
+            return;
+          }
+          if (rebuffering && waited > 8000 && !readyV) {
+            restartDeadVideoStream('restart-rebuffer-video-stalled', {
+              stalledMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : -1,
+              readyAudioSec: readyA,
+              rebufferWaitMs: waited
+            });
             return;
           }
           applyStreamHold();
@@ -2460,6 +2470,7 @@
     videoShownAt = 0;
     videoFrames = 0;
     lastVideoDecodeAt = 0;
+    rebufferVideoDecodeAt = 0;
     lastFrameInterval = 0;
     lastOutputWatchAt = 0;
     outputGapSince = 0;
@@ -2515,6 +2526,7 @@
         onVideoDecode: function () {
           var decodeNow = Date.now();
           if (lastVideoDecodeAt) lastFrameInterval = decodeNow - lastVideoDecodeAt;
+          if (rebuffering) rebufferVideoDecodeAt = decodeNow;
           var frame = $('stageFrame');
           if (frame) frame.className = 'stage-frame';
           var loadingBg = $('stageLoadingBg');
@@ -3230,6 +3242,9 @@
   });
   bindToggleBtns('.rbtn', 'rbtn', function (el) {
     vbrLow = el.getAttribute('data-vbr') === 'low';
+  });
+  bindToggleBtns('.fmtbtn', 'fmtbtn', function (el) {
+    streamFormat = el.getAttribute('data-format') || '243+140';
   });
   bindToggleBtns('.bbtn', 'bbtn', function (el) {
     var n = parseInt(el.getAttribute('data-buf'), 10);

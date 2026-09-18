@@ -702,6 +702,7 @@ wss.on('connection', function (ws, req, parsed) {
   const start = stream.parseStart(parsed.query.start);
   const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
   const low = parsed.query.vbr === 'low';
+  const format = parsed.query.format || '';
   const refresh = parsed.query.refresh === '1';
   const legacySeek = parsed.query.legacy === '1';
   if (!input) {
@@ -709,7 +710,7 @@ wss.on('connection', function (ws, req, parsed) {
     ws.close();
     return;
   }
-  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, refresh: refresh, legacySeek: legacySeek });
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, format: format, refresh: refresh, legacySeek: legacySeek });
 });
 
 function shutdown() {
