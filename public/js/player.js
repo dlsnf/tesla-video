@@ -70,6 +70,9 @@
   var streamRetry = 0;
   var streamGen = 0;
   var pipeTok = 0;
+  var pipeLegacy = false;
+  var recoveringStream = false;
+  var lastRebufferSkipLog = 0;
   var lastSyncRestart = 0;
   var lastDeadVideoRestart = 0;
   var prerollRecoveryCount = 0;
@@ -1346,22 +1349,34 @@
     });
   }
 
+  function parkedAudioSec(out) {
+    var parked = out && out._parked;
+    if (!parked || !parked.length) return 0;
+    var sec = 0;
+    var i;
+    for (i = 0; i < parked.length; i++) sec += parked[i].left.length / parked[i].rate;
+    return sec;
+  }
+
   function queuedAudio(pl) {
     pl = pl || player;
+    var device = 0;
     try {
       var out = pl && pl.audioOut;
-      if (!out || !out.context) return 0;
-      if (out.getEnqueuedTime) {
-        var t = out.getEnqueuedTime();
-        if (t > 0) return t;
+      if (out && out.context) {
+        if (out.getEnqueuedTime) {
+          var t = out.getEnqueuedTime();
+          if (t > 0) device = t;
+        }
+        if (!(device > 0) && out.startTime > 0) {
+          var left = out.startTime - out.context.currentTime;
+          if (left > 0) device = left;
+        }
+        if (!(device > 0) && out.enqueuedTime > 0) device = out.enqueuedTime;
       }
-      if (out.startTime > 0) {
-        var left = out.startTime - out.context.currentTime;
-        if (left > 0) return left;
-      }
-      if (out.enqueuedTime > 0) return out.enqueuedTime;
     } catch (e) {}
-    return 0;
+    if (!(device > 0)) device = 0;
+    return device + parkedAudioSec(pl && pl.audioOut);
   }
 
   function rememberHeard(t) {
@@ -1642,6 +1657,15 @@
     }
     if (pausePos >= 0) return pausePos;
     return lastPlaybackPos >= startAt ? lastPlaybackPos : startAt;
+  }
+
+  // A retry after the encode dies must continue from what was on screen.
+  // startAt stays at the original request, which is 0 for a normal play.
+  function streamResumeSec() {
+    var played = currentPos();
+    if (!(played > 0.5)) played = lastPlaybackPos > 0 ? lastPlaybackPos : startAt;
+    if (played > startAt + 1) return Math.max(0, played - 0.5);
+    return Math.max(0, startAt || 0);
   }
 
   function fmtPlayClock(sec) {
@@ -2090,6 +2114,7 @@
 
   function playUrl(src, seek, opts) {
     opts = opts || {};
+    var useLegacy = !!opts.legacy;
     if (!opts.recovery) prerollRecoveryCount = 0;
     var playSeq = beginReq();
     var keepPaused = !!opts.keepPaused;
@@ -2124,6 +2149,7 @@
       setTimeout(function () {
         if (tok !== pipeTok || playing !== src0) return;
         startAt = at0;
+        pipeLegacy = useLegacy;
         startPipes(src0);
       }, 120);
       return;
@@ -2190,6 +2216,7 @@
       rememberAvatars([watchChannel]);
       paintWatchStar();
       paintSubBtn();
+      pipeLegacy = useLegacy;
       startPipes(src);
       if (relatedTimer) clearTimeout(relatedTimer);
       var keepTab = currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs';
@@ -2265,6 +2292,9 @@
       if (!WA.CachedContext || WA.CachedContext.state === 'closed') {
         WA.CachedContext = new C();
       }
+      // CachedContext is the playback context. Resuming it while paused
+      // plays the queued buffers out in silence and leaves the picture behind.
+      if (paused) return;
       var ctx = WA.CachedContext;
       if (ctx.resume) ctx.resume();
       var buf = ctx.createBuffer(1, 1, 22050);
@@ -2294,6 +2324,7 @@
 
   function unlockPlaybackAudio() {
     primeHtmlAudio();
+    if (paused) return;
     wakeAudio();
     try {
       var out = player && player.audioOut;
@@ -2340,7 +2371,9 @@
     videoLeadSince = 0;
     unlockAudio();
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
-    launchPlayer(wsUrlFor(src, startAt, startAt > 2));
+    var legacy = pipeLegacy;
+    pipeLegacy = false;
+    launchPlayer(wsUrlFor(src, startAt, legacy || startAt > 2, legacy));
     if (paused) {
       holdPlayback();
       videoStartWall = Date.now();
@@ -2458,7 +2491,9 @@
       return heard > 0 && isFinite(heard) ? heard : 0;
     };
     WA.prototype.play = function (rate, left, right) {
-      if (prerolling) {
+      // Keep the PCM. Dropping it advances the decoder without anything to
+      // play, so the next sound after resume belongs to a later frame.
+      if (prerolling || paused) {
         if (!this._pending) this._pending = [];
         this._pending.push({
           rate: rate,
@@ -2467,7 +2502,6 @@
         });
         return;
       }
-      if (paused) return;
       if (!this.enabled) return;
       this.unlocked = true;
       try {
@@ -2629,15 +2663,27 @@
     var videoAhead = videoAheadSec();
     var packed = packedAhead();
     var queued = queuedAudio();
+    // A full video buffer with no audio and no new frames is not a cushion.
+    // The picture is stuck, and waiting here used to end in a restart at 0.
+    var videoStalled = lastVideoDecodeAt > 0 && Date.now() - lastVideoDecodeAt > 1500;
+    var audioEmpty = audioAhead < 0.08 && queued < 0.08;
+    var nearTitleEnd = duration > 0 && currentPos() > duration - 3;
+    if (videoStalled && audioEmpty && videoAhead > 1 && !nearTitleEnd && !(resumeAt && Date.now() - resumeAt < 4000)) {
+      restartDeadVideoStream('restart-audio-starved');
+      return;
+    }
     if (audioAhead > 1.0 || videoAhead > 1.0 || packed > 1.5 || queued > 0.8) {
-      debugPlayback('beginRebuffer-skip-buffer-present', {
-        audioAhead: audioAhead,
-        videoAhead: videoAhead,
-        packedAhead: packed,
-        queuedAudio: queued,
-        videoFail: videoFail,
-        lastVideoDecodeMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : -1
-      });
+      if (!lastRebufferSkipLog || Date.now() - lastRebufferSkipLog > 2000) {
+        lastRebufferSkipLog = Date.now();
+        debugPlayback('beginRebuffer-skip-buffer-present', {
+          audioAhead: audioAhead,
+          videoAhead: videoAhead,
+          packedAhead: packed,
+          queuedAudio: queued,
+          videoFail: videoFail,
+          lastVideoDecodeMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : -1
+        });
+      }
       return;
     }
     debugPlayback('beginRebuffer', {
@@ -2710,7 +2756,7 @@
       if (this.audioOut) {
         this.audioOut.unlocked = true;
         try {
-          if (!prerolling && this.audioOut.context && this.audioOut.context.state !== 'running' && this.audioOut.context.resume) {
+          if (!paused && !prerolling && this.audioOut.context && this.audioOut.context.state !== 'running' && this.audioOut.context.resume) {
             this.audioOut.context.resume();
           }
         } catch (e) {}
@@ -2723,7 +2769,7 @@
         restartDeadVideoStream('restart-no-video-first-frame');
         return;
       }
-      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000 && !(streamEnded && audioPendingSec() < 0.25)) {
+      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000 && !(resumeAt && Date.now() - resumeAt < 4000) && !(streamEnded && audioPendingSec() < 0.25)) {
         restartDeadVideoStream('restart-video-stalled', {
           stalledMs: Date.now() - lastVideoDecodeAt
         });
@@ -2783,7 +2829,7 @@
           return;
         }
       }
-      if (this.audio && this.audioOut && this.audioOut.enabled) {
+      if (!paused && this.audio && this.audioOut && this.audioOut.enabled) {
         var queued = queuedAudio(this);
         var queueTarget = resumePending ? 0.15 : AUDIO_QUEUE_SEC;
         var n2 = 0;
@@ -2957,10 +3003,13 @@
             debugPlayback('seek-stream-closed', msg);
           }
           if (msg && msg.type === 'seek-retry') {
-            setStatus('시크 구간을 다시 준비하는 중...');
+            var resumeSec = streamResumeSec();
+            recoveringStream = true;
+            setStatus(resumeSec > 1 ? '끊긴 위치부터 다시 받는 중...' : '시크 구간을 다시 준비하는 중...');
             setTimeout(function () {
+              recoveringStream = false;
               if (gen !== streamGen || !playing || ended) return;
-              launchPlayer(wsUrlFor(playing, startAt, false, msg.mode === 'legacy'));
+              playUrl(playing, resumeSec, { skipInfo: true, legacy: msg.mode === 'legacy' });
             }, 40);
             return;
           }
@@ -3023,7 +3072,7 @@
         failPreroll(lastStreamErr || '지정한 위치로 이동하지 못했습니다. 다시 눌러 보세요.');
         return;
       }
-      if (!ended && playing && !paused && !streamEnded && !nearEnd()) {
+      if (!ended && playing && !paused && !streamEnded && !nearEnd() && !recoveringStream) {
         if (Date.now() - lastSocketRestart >= 12000) {
           lastSocketRestart = Date.now();
           var resumeSec = Math.max(0, currentPos() - 0.5);
@@ -3104,12 +3153,95 @@
     togglePause();
   }
 
+  function copyChannel(buf, channel, from) {
+    var data = buf.getChannelData(channel);
+    return new Float32Array(data.subarray(from));
+  }
+
+  function fadeHead(left, right) {
+    var n = Math.min(64, left.length);
+    var f;
+    for (f = 0; f < n; f++) {
+      var g = f / n;
+      left[f] *= g;
+      right[f] *= g;
+    }
+  }
+
+  // The shared AudioContext keeps running if anything calls resume(), and the
+  // samples already handed to it then play out at zero gain. Stop those
+  // buffers and keep the unplayed tail so resume continues the same sound.
+  function parkScheduledAudio(out) {
+    if (!out || out._held) return;
+    out._held = true;
+    var ctx = out.context;
+    var srcs = (out._srcs || []).slice();
+    out._srcs = [];
+    var kept = [];
+    var now = 0;
+    try { if (ctx) now = ctx.currentTime; } catch (eNow) { now = 0; }
+    var i;
+    for (i = 0; i < srcs.length; i++) {
+      var src = srcs[i];
+      try { src.onended = null; } catch (e0) {}
+      try {
+        var buf = src.buffer;
+        var when = src._ctxAt;
+        var rate = buf ? buf.sampleRate : 0;
+        if (buf && rate > 0 && isFinite(src._mediaAt) && when != null && isFinite(when)) {
+          var skip = now - when;
+          var from = skip > 0 ? Math.floor(skip * rate) : 0;
+          if (from < 0) from = 0;
+          if (from < buf.length) {
+            var left = copyChannel(buf, 0, from);
+            var right = buf.numberOfChannels > 1 ? copyChannel(buf, 1, from) : new Float32Array(left);
+            if (from > 0 && kept.length === 0) fadeHead(left, right);
+            kept.push({
+              rate: rate,
+              left: left,
+              right: right,
+              mediaAt: src._mediaAt + (from / rate)
+            });
+          }
+        }
+      } catch (eCopy) {}
+      try { src.stop(0); } catch (e1) {}
+      try { src.disconnect(); } catch (e2) {}
+    }
+    if (kept.length) {
+      audioMediaCursor = kept[0].mediaAt;
+      out._schedEndMedia = audioMediaCursor;
+      out._schedEndCtx = now;
+      out.startTime = now;
+    }
+    out._parked = kept;
+  }
+
+  function scheduleHeldAudio(out) {
+    if (!out) return;
+    var parked = out._parked || [];
+    var pending = out._pending || [];
+    out._parked = [];
+    out._pending = [];
+    out._held = false;
+    var ctx = out.context;
+    if (ctx) {
+      var soon = ctx.currentTime + 0.02;
+      var endCtx = out._schedEndCtx || 0;
+      out.startTime = endCtx > soon ? endCtx : soon;
+    }
+    var i;
+    for (i = 0; i < parked.length; i++) out.play(parked[i].rate, parked[i].left, parked[i].right);
+    for (i = 0; i < pending.length; i++) out.play(pending[i].rate, pending[i].left, pending[i].right);
+  }
+
   function holdPlayback() {
     if (!player) return;
     hookNetBytes();
     pauseUnread = bitsUnread(player.audio) + bitsUnread(player.video);
     pauseNet0 = netBytes;
     if (player.audioOut) {
+      parkScheduledAudio(player.audioOut);
       player.audioOut.enabled = false;
       try { if (player.audioOut.gain) player.audioOut.gain.gain.value = 0; } catch (e5) {}
       var ctx = player.audioOut.context;
@@ -3131,29 +3263,24 @@
       player.audioOut.unlocked = true;
       if (prerolling) flushPrerollAudio(player.audioOut);
       var ctx = player.audioOut.context;
-      var pending = player.audioOut._pending || [];
       var live = playingSoundTime({ fallback: false });
       debugPlayback('resume-after-paused-seek', {
         videoTime: player.video && isFinite(player.video.currentTime) ? player.video.currentTime : -1,
         audioCursor: audioMediaCursor,
         decodedTime: player.audio && isFinite(player.audio.decodedTime) ? player.audio.decodedTime : -1,
         pendingAudioSec: pendingAudioSec(player.audioOut),
+        parkedAudioSec: parkedAudioSec(player.audioOut),
         contextTime: ctx ? ctx.currentTime : -1,
         liveSoundTime: live,
         speakerHeard: speakerHeard()
       });
-      // Keep the sample cursor. Pointing it at the video decoder or the
-      // decoded-ahead head skips or repeats audible time after a short pause.
-      if (ctx) {
-        var endCtx = player.audioOut._schedEndCtx || 0;
-        if (!(endCtx > ctx.currentTime + 0.02)) player.audioOut.startTime = ctx.currentTime + 0.02;
-      }
-      if (pending.length && ctx) player.audioOut.startTime = ctx.currentTime + 0.02;
-      player.audioOut._pending = [];
-      var pi;
-      for (pi = 0; pi < pending.length; pi++) {
-        player.audioOut.play(pending[pi].rate, pending[pi].left, pending[pi].right);
-      }
+      // Replay the tail captured at pause. Scheduling it at the video head
+      // would skip the sound that was already queued, and scheduling it at
+      // the decoder head would repeat it.
+      scheduleHeldAudio(player.audioOut);
+      // The last frame is from before the pause. Leaving its timestamp in
+      // place makes a pause longer than 4s look like a stalled decoder.
+      lastVideoDecodeAt = Date.now();
       seekSettleUntil = 0;
       try {
         if (ctx && ctx.state !== 'running' && ctx.resume) {
@@ -3338,6 +3465,9 @@
     var v = Math.max(0, Math.min(100, pct)) / 100;
     if (player) {
       try { player.volume = v; } catch (e) {}
+      try {
+        if (!paused && player.audioOut && player.audioOut.gain) player.audioOut.gain.gain.value = v;
+      } catch (e2) {}
     }
     if (na) { na.volume = v; na.muted = pct <= 0; }
   }
