@@ -30,6 +30,7 @@
   var seamReady = false;
   var seamHasFrame = false;
   var seamStarted = 0;
+  var seamLegacy = false;
   var armingSeam = false;
   var VIDEO_CATCH_FRAMES = 2;
   var VIDEO_CATCH_MAX_FRAMES = 24;
@@ -48,6 +49,12 @@
   var videoFail = 0;
   var ended = false;
   var streamEnded = false;
+  // A repeat keeps the previous title length. An encoder close far before
+  // that label is a dropped stream, not the credits.
+  var earlyResumeAt = -1;
+  var earlyResumeLegacy = false;
+  var pendingEarlyContinue = false;
+  var forceShortFinish = false;
   var repeatEnabled = false;
   var repeatTimer = null;
   var repeatAt = 0;
@@ -1455,7 +1462,7 @@
   }
 
   function videoCaughtUp(vt, heard) {
-    return heard > 0 && isFinite(vt) && vt >= heard - 0.025 && vt <= heard + 0.04;
+    return heard > 0 && isFinite(vt) && vt >= heard - 0.008 && vt <= heard + 0.04;
   }
 
   function restartDeadVideoStream(reason, extra) {
@@ -1550,7 +1557,7 @@
       heard = targetHeard();
       vt = pl.video.currentTime;
       if (!(heard > 0) || !isFinite(vt)) break;
-      if (vt >= heard - 0.02) {
+      if (vt >= heard - 0.004) {
         videoFail = 0;
         markCaughtUp();
         break;
@@ -1806,9 +1813,28 @@
 
   function nearEnd() {
     if (isLive || !(duration > 0)) return false;
-    // A socket close this close to the title is the file finishing, not a
-    // stall. It must not start the repeat countdown by itself.
-    return currentPos() >= Math.max(0, duration - 1.5);
+    // Use the heard position. A retained label from the previous play must
+    // not make a repeat look finished for its whole running time.
+    return audiblePos() >= Math.max(0, duration - 1.5);
+  }
+
+  function titleGapSec() {
+    if (isLive || !(duration > 0)) return 0;
+    var gap = duration - audiblePos();
+    return gap > 0 ? gap : 0;
+  }
+
+  // The bytes already in hand reach the title, allowing the same slack the
+  // clock uses when the label is a little longer than the last sample.
+  function tailCoversTitle() {
+    var gap = titleGapSec();
+    if (!(gap > 2.5)) return true;
+    return audioAheadSec() + 2.5 >= gap;
+  }
+
+  function titleStillAhead() {
+    if (isLive || !(duration > 0)) return false;
+    return titleGapSec() > 2.5 && !tailCoversTitle();
   }
 
   function audioPendingSec() {
@@ -1819,9 +1845,54 @@
     if (isLive || !streamEnded) return false;
     if (audioPendingSec() >= 0.25) return false;
     if (!(duration > 0)) return true;
-    var gap = duration - audiblePos();
+    var gap = titleGapSec();
+    // A large hole means the encode stopped early. Finishing here skips the
+    // rest of the title and starts the repeat countdown.
+    if (gap > 2.5 && !forceShortFinish) return false;
     if (gap > 2.5) return true;
     return currentPos() >= duration - 0.2;
+  }
+
+  function continueUnfinishedTitle(preferLegacy) {
+    if (ended || !playing || isLive) return false;
+    if (recoveringStream) return true;
+    if (paused) {
+      pendingEarlyContinue = true;
+      return true;
+    }
+    var at = streamResumeSec();
+    if (duration > 0 && at > duration - 1) at = Math.max(0, duration - 1);
+    var same = earlyResumeAt >= 0 && Math.abs(at - earlyResumeAt) < 12;
+    var useLegacy = false;
+    if (same) {
+      if (earlyResumeLegacy) return false;
+      useLegacy = true;
+      earlyResumeLegacy = true;
+    } else if (preferLegacy) {
+      useLegacy = true;
+      earlyResumeLegacy = true;
+    } else {
+      earlyResumeLegacy = false;
+    }
+    earlyResumeAt = at;
+    pendingEarlyContinue = false;
+    debugPlayback('continue-unfinished', {
+      at: at,
+      gap: titleGapSec(),
+      audioAhead: audioAheadSec(),
+      legacy: useLegacy
+    });
+    recoveringStream = true;
+    if (beginSeamlessReconnect(useLegacy)) return true;
+    var gen = streamGen;
+    var resumeAtSec = at;
+    setStatus(resumeAtSec > 1 ? '끊긴 위치부터 다시 받는 중...' : '불러오는 중');
+    setTimeout(function () {
+      recoveringStream = false;
+      if (gen !== streamGen || !playing || ended) return;
+      playUrl(playing, resumeAtSec, { skipInfo: true, legacy: useLegacy, keepEarlyResume: true });
+    }, 40);
+    return true;
   }
 
   function flushDemuxTail() {
@@ -1912,23 +1983,20 @@
     var audioUse = byteUse(player.audio);
     var videoUse = byteUse(player.video);
     var bytesTight = audioUse >= 0.45 || videoUse >= 0.45;
-    var quiet = lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 1500;
-    // Refill while several seconds are still queued. Waiting until the sound
-    // is already gone freezes the picture, and the stalled stream then reloads.
-    if (!paused && (audioAhead < 5 || videoAhead < 0.5)) {
+    var quiet = lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 800;
+    // Start pulling again while most of the target is still left. A 5s floor
+    // lets the speaker queue hit zero before the server is sending again.
+    var refillBelow = Math.max(8, bufTarget - 4);
+    if (!paused && (audioAhead < refillBelow || videoAhead < 1)) {
       sendStreamCtrl(false, quiet);
       return;
     }
     var wantHold = false;
     if (paused) {
       if (ahead >= bufTarget || ahead >= remain - 0.2 || bytesTight) wantHold = true;
-    } else if (bytesTight && audioAhead >= 8) {
-      wantHold = true;
-    } else if (videoAhead >= bufTarget || audioAhead >= bufTarget) {
+    } else if (audioAhead >= bufTarget) {
       wantHold = true;
     } else if (ahead >= bufTarget && q > 0.6) {
-      wantHold = true;
-    } else if (fill >= 0.65 && q > 1.2 && audioAhead >= 8) {
       wantHold = true;
     }
     if (wantHold) {
@@ -2039,17 +2107,15 @@
       var room = this.bytes.length - this.byteLength;
       if (room < buf.length && this.resize) {
         var need = this.byteLength + buf.length;
-        var maxCap = 8 * 1024 * 1024;
-        if (need <= maxCap) this.resize(Math.max(need, Math.min(maxCap, this.bytes.length * 2)));
+        this.resize(Math.max(need, this.bytes.length * 2));
         room = this.bytes.length - this.byteLength;
       }
       if (room < buf.length) {
-        // Skipping this chunk and keeping what follows splits the elementary
-        // stream. The picture breaks up and the clock drifts off the sound.
+        // Clearing this side only skips seconds of picture or sound while the
+        // other side and both clocks keep going, so they drift apart by that gap.
         sendStreamCtrl(true);
-        this.byteLength = 0;
-        this.index = 0;
-        if (buf.length > this.bytes.length) return;
+        needStreamRestart = true;
+        return;
       }
       overflowFails = 0;
       this.bytes.set(buf, this.byteLength);
@@ -2118,6 +2184,10 @@
     repeatAt = 0;
     endCoastFrom = 0;
     endCoastPos = 0;
+    earlyResumeAt = -1;
+    earlyResumeLegacy = false;
+    pendingEarlyContinue = false;
+    forceShortFinish = false;
     updateRepeatButton();
     playing = null;
     paused = false;
@@ -2192,10 +2262,17 @@
     var keepPaused = !!opts.keepPaused;
     var skipInfo = !!opts.skipInfo && duration > 0 && sameWatch(src);
     preservedStageFrame = '';
+    var keepEarlyResume = !!opts.keepEarlyResume;
+    var savedEarlyAt = earlyResumeAt;
+    var savedEarlyLegacy = earlyResumeLegacy;
     if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg on';
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain on';
     wakeAudio();
     stop(true);
+    if (keepEarlyResume) {
+      earlyResumeAt = savedEarlyAt;
+      earlyResumeLegacy = savedEarlyLegacy;
+    }
     playing = src;
     startAt = seek || 0;
     lastPlaybackPos = startAt;
@@ -2744,14 +2821,6 @@
     var videoAhead = videoAheadSec();
     var packed = packedAhead();
     var queued = queuedAudio();
-    var audioDry = audioAhead < 0.08 && queued < 0.08;
-    var stalled = lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 2000;
-    // Video bytes can keep arriving after the sound is gone. Waiting on that
-    // same socket shows a loading state that never returns to playback.
-    if (audioDry && stalled && Date.now() - lastDeadVideoRestart >= 15000) {
-      restartDeadVideoStream('restart-audio-dry');
-      return;
-    }
     if (audioAhead > 1.0 || videoAhead > 1.0 || packed > 1.5 || queued > 0.8) {
       if (!lastRebufferSkipLog || Date.now() - lastRebufferSkipLog > 2000) {
         lastRebufferSkipLog = Date.now();
@@ -2834,6 +2903,10 @@
       }
       applyStreamHold();
       if (ended) return;
+      if (streamEnded && titleStillAhead()) {
+        if (continueUnfinishedTitle()) return;
+        if (audioPendingSec() < 0.25) forceShortFinish = true;
+      }
       if (readyToFinish()) {
         finishPlayback();
         return;
@@ -2987,6 +3060,8 @@
     rebuffering = false;
     ended = false;
     streamEnded = false;
+    forceShortFinish = false;
+    if (!paused) lastPlaybackPos = startAt;
     try {
       patchMpegPacing();
       patchAudioClicks();
@@ -3094,6 +3169,8 @@
     seamHasFrame = false;
     seamSpliceAt = 0;
     seamStarted = 0;
+    seamLegacy = false;
+    recoveringStream = false;
     if (extra) {
       try { extra._seam = false; } catch (e0) {}
       try { if (extra.audioOut) extra.audioOut._seamHold = false; } catch (e1) {}
@@ -3138,6 +3215,8 @@
     seamReady = false;
     seamHasFrame = false;
     seamSpliceAt = 0;
+    seamLegacy = false;
+    recoveringStream = false;
     next._seam = false;
     if (next.audioOut) {
       next.audioOut._seamHold = false;
@@ -3196,12 +3275,13 @@
     }
     if (left < 0.3 && !seamReady) {
       var resumeSec = Math.max(0, currentPos() - 0.3);
+      var legacy = seamLegacy;
       cancelSeam();
-      playUrl(playing, resumeSec, { skipInfo: true });
+      playUrl(playing, resumeSec, { skipInfo: true, legacy: legacy });
     }
   }
 
-  function beginSeamlessReconnect() {
+  function beginSeamlessReconnect(legacy) {
     if (seamPlayer) return true;
     if (!playing || !player || paused || ended || isLive) return false;
     var remain = audioAheadSec();
@@ -3209,6 +3289,7 @@
     var at = currentPos() + remain;
     if (duration > 0 && at > duration - 1.5) return false;
     seamSpliceAt = at;
+    seamLegacy = !!legacy;
     seamReady = false;
     seamHasFrame = false;
     seamStarted = Date.now();
@@ -3221,7 +3302,7 @@
     armingSeam = true;
     try {
       var prefetch = null;
-      prefetch = new JSMpeg.Player(wsUrlFor(playing, at, true), {
+      prefetch = new JSMpeg.Player(wsUrlFor(playing, at, true, !!legacy), {
         canvas: seamCanvas,
         audio: true,
         streaming: true,
@@ -3290,18 +3371,29 @@
             debugPlayback('seek-stream-closed', msg);
           }
           if (msg && msg.type === 'seek-retry') {
-            var resumeSec = streamResumeSec();
-            recoveringStream = true;
-            setStatus(resumeSec > 1 ? '끊긴 위치부터 다시 받는 중...' : '시크 구간을 다시 준비하는 중...');
-            setTimeout(function () {
-              recoveringStream = false;
-              if (gen !== streamGen || !playing || ended) return;
-              playUrl(playing, resumeSec, { skipInfo: true, legacy: msg.mode === 'legacy' });
-            }, 40);
+            if (!titleStillAhead()) {
+              markStreamEnded();
+              return;
+            }
+            if (continueUnfinishedTitle(msg.mode === 'legacy')) return;
+            forceShortFinish = true;
+            markStreamEnded();
             return;
           }
           if (msg && msg.type === 'ended') {
             flushDemuxTail();
+            debugPlayback('encoder-ended', {
+              gap: titleGapSec(),
+              audioAhead: audioAheadSec(),
+              covers: tailCoversTitle(),
+              encoded: msg.encoded,
+              expected: msg.expected,
+              position: audiblePos()
+            });
+            if (titleStillAhead()) {
+              if (continueUnfinishedTitle()) return;
+              forceShortFinish = true;
+            }
             markStreamEnded();
           }
           if (msg && (msg.type === 'error' || msg.type === 'status') && msg.message) {
@@ -3319,6 +3411,8 @@
                 if (gen !== streamGen) return;
                 if (playing && prerolling) startPipes(playing);
               }, 500);
+            } else if (/시크 구간을 다시 준비/.test(sm) && audioAheadSec() >= 4) {
+              return;
             } else if (/MPEG1|위치부터 받는/.test(sm) && !lastStreamErr) {
               setStatus(startAt > 2 ? '지정한 위치로 이동 중...' : '불러오는 중');
             } else if (!lastStreamErr && sm && !/MPEG1|확인하는|위치부터 받는/.test(sm)) {
@@ -3350,7 +3444,17 @@
         try { origClose(); } catch (eC) {}
       }
       if (prerolling && playing && !ended && !paused) {
-        if (netBytes >= 4000) return;
+        if (netBytes >= 4000) {
+          if (!recoveringStream && !isLive && duration > 0 && tailCoversTitle()) {
+            markStreamEnded();
+            return;
+          }
+          if (titleStillAhead() && !continueUnfinishedTitle(false)) {
+            forceShortFinish = true;
+            markStreamEnded();
+          }
+          return;
+        }
         if (streamRetry < 1) {
           streamRetry += 1;
           setTimeout(function () {
@@ -3366,7 +3470,10 @@
         if (Date.now() - lastSocketRestart < 12000) return;
         lastSocketRestart = Date.now();
         if (beginSeamlessReconnect()) return;
-        if (duration > 0 && currentPos() + audioAheadSec() >= duration - 0.8) return;
+        if (!isLive && duration > 0 && tailCoversTitle()) {
+          markStreamEnded();
+          return;
+        }
         var resumeSec = Math.max(0, currentPos() - 0.5);
         if (resumeSec < 5 && lastPlaybackPos >= 5) resumeSec = Math.max(0, lastPlaybackPos - 0.5);
         setStatus('네트워크가 끊겨 재연결하는 중...');
@@ -3589,6 +3696,10 @@
     player.wantsToPlay = true;
     player.paused = false;
     unlockPlaybackAudio();
+    if (pendingEarlyContinue && titleStillAhead()) {
+      pendingEarlyContinue = false;
+      continueUnfinishedTitle();
+    }
     if (!player.animationId && player.play) player.play();
     skipVideoToSound(player);
     scheduleResumeSync(0);

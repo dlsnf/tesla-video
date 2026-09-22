@@ -222,9 +222,17 @@ function netInput(url, coarse, isLive, headers, opts) {
     a.unshift('-reconnect', '1');
   }
   if (!isLive && coarse > 0) a.push('-ss', String(coarse));
+  // A googlevideo socket can reset while stdout is paused for the browser
+  // buffer. Retry that drop instead of treating it as the end of the file.
+  // reconnect_at_eof is intentionally off so a real ending still finishes.
+  if (!isLive) {
+    a.unshift('-reconnect_delay_max', '4');
+    a.unshift('-reconnect_streamed', '1');
+    a.unshift('-reconnect', '1');
+  }
   // VOD is deliberately produced ahead of real time so the browser has a
   // meaningful reserve before a brief network or decoder hiccup.
-  if (!opts.noRate) a.push('-readrate', isLive ? '1.0' : '1.35');
+  if (!opts.noRate) a.push('-readrate', isLive ? '1.0' : '4');
   a.push('-i', url);
   return a;
 }
@@ -560,13 +568,13 @@ function attachWsStream(ws, input, quality, start, extra) {
       cur.stderr.on('data', function (d) {
         var text = d.toString();
         if (/403|forbidden|http error/i.test(text)) sourceRejectedSeen = true;
-        var tm = text.match(/time=([0-9:.]+)/g);
-        if (tm && tm.length) {
-          var raw = tm[tm.length - 1].replace(/^time=/, '').split(':');
-          if (raw.length === 3) {
-            var parsed = (parseFloat(raw[0]) * 3600) + (parseFloat(raw[1]) * 60) + parseFloat(raw[2]);
-            if (isFinite(parsed)) lastEncodedSec = parsed;
-          }
+        var timeRe = /(?:^|[\s\r])time=(\d+):(\d+):(\d+(?:\.\d+)?)/g;
+        var timeHit = null;
+        var timeMatch;
+        while ((timeMatch = timeRe.exec(text))) timeHit = timeMatch;
+        if (timeHit) {
+          var parsed = (parseFloat(timeHit[1]) * 3600) + (parseFloat(timeHit[2]) * 60) + parseFloat(timeHit[3]);
+          if (isFinite(parsed) && parsed + 1 >= lastEncodedSec) lastEncodedSec = parsed;
         }
         errBuf += text;
         if (errBuf.length > 1200) errBuf = errBuf.slice(-600);
@@ -664,25 +672,31 @@ function attachWsStream(ws, input, quality, start, extra) {
           var shortOutput = !code && !legacySeek && expectedSec > 15
             && lastEncodedSec > 0
             && lastEncodedSec < expectedSec - 4;
-          if (parseStart(start) > 2) {
-            sendJson(ws, {
-              type: 'seek-debug',
-              start: parseStart(start),
-              expected: expectedSec,
-              encoded: lastEncodedSec,
-              code: code == null ? null : code,
-              legacy: legacySeek,
-              short: shortOutput,
-            });
-          }
+          sendJson(ws, {
+            type: 'seek-debug',
+            start: parseStart(start),
+            expected: expectedSec,
+            encoded: lastEncodedSec,
+            code: code == null ? null : code,
+            legacy: legacySeek,
+            short: shortOutput,
+          });
           if (shortOutput && encodeAttempt < 2) {
             encodeAttempt += 1;
+            try { media.invalidateSource(info && info.id); } catch (eShort) {}
             sendStatus(ws, '시크 구간을 다시 준비하는 중...');
-            closeAfterDrain({ type: 'seek-retry', mode: 'legacy' });
+            closeAfterDrain({ type: 'seek-retry', mode: 'legacy', encoded: lastEncodedSec, expected: expectedSec });
             return;
           }
           if (!code) {
-            closeAfterDrain({ type: 'ended' });
+            // No progress timestamp and a long remainder is an early close,
+            // not the title ending. Let the client continue from the playhead.
+            var reachedEnd = !(expectedSec > 15) || (lastEncodedSec > 0 && lastEncodedSec >= expectedSec - 4);
+            if (!reachedEnd) {
+              closeAfterDrain(null);
+              return;
+            }
+            closeAfterDrain({ type: 'ended', encoded: lastEncodedSec, expected: expectedSec });
             return;
           }
           var msg = '스트림 종료 (' + code + ')';
