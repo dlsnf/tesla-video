@@ -22,7 +22,15 @@
   var AUDIO_QUEUE_SEC = 2.5;
   var SEEK_AUDIO_PREROLL_SEC = 3;
   var PREROLL_SEC = 3;
-  var bufTarget = 10;
+  var bufTarget = 20;
+  var seamPlayer = null;
+  var seamCanvas = null;
+  var seamTimer = null;
+  var seamSpliceAt = 0;
+  var seamReady = false;
+  var seamHasFrame = false;
+  var seamStarted = 0;
+  var armingSeam = false;
   var VIDEO_CATCH_FRAMES = 2;
   var VIDEO_CATCH_MAX_FRAMES = 24;
   var SYNC_INTERVAL_MS = 250;
@@ -1388,13 +1396,27 @@
   // Playhead of samples actually handed to the audio device.
   // Decoder time runs ahead while a rebuffer is only queued, and the wall
   // clock keeps moving through a stall. Neither matches what is audible.
+  function speakerDelaySec() {
+    try {
+      var ctx = player && player.audioOut && player.audioOut.context;
+      if (!ctx) return 0;
+      var delay = 0;
+      if (isFinite(ctx.outputLatency) && ctx.outputLatency > 0) delay = ctx.outputLatency;
+      else if (isFinite(ctx.baseLatency) && ctx.baseLatency > 0) delay = ctx.baseLatency;
+      if (delay > 0.25) delay = 0.25;
+      return delay > 0 ? delay : 0;
+    } catch (e) { return 0; }
+  }
+
   function speakerHeard() {
     try {
       var out = player && player.audioOut;
       if (!out || !out.context || !(out._schedEndMedia > 0) || out._schedEndCtx == null) return 0;
       var ahead = out._schedEndCtx - out.context.currentTime;
       if (ahead < 0) ahead = 0;
-      var heard = out._schedEndMedia - ahead;
+      // currentTime is when the sample enters the output device. The picture
+      // has to wait out the device delay or it leads the sound that is heard.
+      var heard = out._schedEndMedia - ahead - speakerDelaySec();
       return heard > 0 && isFinite(heard) ? heard : 0;
     } catch (e) { return 0; }
   }
@@ -1593,6 +1615,7 @@
         videoAhead: videoAheadSec(),
         audioAhead: audioAheadSec(),
         queuedAudio: queuedAudio(),
+        speakerDelayMs: Math.round(speakerDelaySec() * 1000),
       });
     }
   }
@@ -1720,7 +1743,20 @@
     return Math.max(0, bufferLeftSec(player && player.video, videoByteRate()));
   }
 
+  var measuredVideoBps = 0;
+
+  function tuneVideoRate() {
+    var vBytes = bitsUnread(player && player.video);
+    var aSec = bufferLeftSec(player && player.audio, 24000) + queuedAudio();
+    if (vBytes < 8000 || aSec < 2) return;
+    var implied = vBytes / aSec;
+    if (!(implied >= 8000 && implied <= 800000)) return;
+    measuredVideoBps = measuredVideoBps ? (measuredVideoBps * 0.8 + implied * 0.2) : implied;
+  }
+
   function videoByteRate() {
+    tuneVideoRate();
+    if (measuredVideoBps > 0) return measuredVideoBps;
     var kb = 600;
     if (quality >= 720) kb = vbrLow ? 1800 : 3000;
     else if (quality >= 480) kb = vbrLow ? 1100 : 1800;
@@ -1757,9 +1793,9 @@
     try { return player && player.source && player.source.socket; } catch (e) { return null; }
   }
 
-  function sendStreamCtrl(hold) {
+  function sendStreamCtrl(hold, force) {
     hold = !!hold;
-    if (streamHeld === hold) return;
+    if (streamHeld === hold && !force) return;
     var sock = streamSocket();
     if (!sock || sock.readyState !== 1) return;
     try {
@@ -1873,16 +1909,26 @@
     var audioAhead = audioAheadSec();
     var videoAhead = videoAheadSec();
     var remain = remainSec();
-    if (!paused && (audioAhead < 0.8 || videoAhead < 0.5)) {
-      sendStreamCtrl(false);
+    var audioUse = byteUse(player.audio);
+    var videoUse = byteUse(player.video);
+    var bytesTight = audioUse >= 0.45 || videoUse >= 0.45;
+    var quiet = lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 1500;
+    // Refill while several seconds are still queued. Waiting until the sound
+    // is already gone freezes the picture, and the stalled stream then reloads.
+    if (!paused && (audioAhead < 5 || videoAhead < 0.5)) {
+      sendStreamCtrl(false, quiet);
       return;
     }
     var wantHold = false;
     if (paused) {
-      if (ahead >= bufTarget || ahead >= remain - 0.2) wantHold = true;
+      if (ahead >= bufTarget || ahead >= remain - 0.2 || bytesTight) wantHold = true;
+    } else if (bytesTight && audioAhead >= 8) {
+      wantHold = true;
+    } else if (videoAhead >= bufTarget || audioAhead >= bufTarget) {
+      wantHold = true;
     } else if (ahead >= bufTarget && q > 0.6) {
       wantHold = true;
-    } else if (fill >= 0.65 && q > 1.2) {
+    } else if (fill >= 0.65 && q > 1.2 && audioAhead >= 8) {
       wantHold = true;
     }
     if (wantHold) {
@@ -1893,7 +1939,7 @@
       if (fill <= 0.42 && ahead < bufTarget - 2 && ahead < remain - 0.8) sendStreamCtrl(false);
       return;
     }
-    if (fill < 0.6 && ahead < bufTarget - 1) sendStreamCtrl(false);
+    if (ahead < bufTarget - 2) sendStreamCtrl(false, quiet);
   }
 
   function shouldRestartFromSound(heard, vt) {
@@ -1957,35 +2003,53 @@
     return packedAhead();
   }
 
+  function byteUse(dec) {
+    try {
+      var bits = dec && dec.bits;
+      if (!bits || !bits.bytes || !bits.bytes.length) return 0;
+      var unread = bits.byteLength - ((bits.index || 0) >> 3);
+      if (unread < 0) unread = 0;
+      return unread / bits.bytes.length;
+    } catch (e) { return 0; }
+  }
+
   function hardenBits(dec) {
     if (!dec || !dec.bits || dec.bits.__keep) return;
     var bits = dec.bits;
     bits.__keep = true;
-    bits.evict = function (need) {
+    bits.evict = function () {
       var consumed = this.index >> 3;
-      var cap = this.bytes.length;
-      var tail = cap - this.byteLength;
-      if (this.index === (this.byteLength << 3) || need > tail + consumed) {
-        this.byteLength = 0;
-        this.index = 0;
-        return;
-      }
-      if (consumed > 0) {
+      // A full buffer still holds audio or video we have not played.
+      // Discarding it is what freezes the picture and forces a reload.
+      if (consumed > 0 && this.byteLength > consumed) {
         if (this.bytes.copyWithin) this.bytes.copyWithin(0, consumed, this.byteLength);
         else this.bytes.set(this.bytes.subarray(consumed, this.byteLength), 0);
         this.byteLength -= consumed;
         this.index -= consumed << 3;
+        return;
+      }
+      if (this.index === (this.byteLength << 3)) {
+        this.byteLength = 0;
+        this.index = 0;
       }
     };
     bits.appendSingleBuffer = function (buf) {
       buf = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-      this.evict(buf.length);
+      this.evict();
       var room = this.bytes.length - this.byteLength;
+      if (room < buf.length && this.resize) {
+        var need = this.byteLength + buf.length;
+        var maxCap = 8 * 1024 * 1024;
+        if (need <= maxCap) this.resize(Math.max(need, Math.min(maxCap, this.bytes.length * 2)));
+        room = this.bytes.length - this.byteLength;
+      }
       if (room < buf.length) {
+        // Skipping this chunk and keeping what follows splits the elementary
+        // stream. The picture breaks up and the clock drifts off the sound.
         sendStreamCtrl(true);
-        overflowFails++;
-        if (overflowFails >= 3) needStreamRestart = true;
-        return;
+        this.byteLength = 0;
+        this.index = 0;
+        if (buf.length > this.bytes.length) return;
       }
       overflowFails = 0;
       this.bytes.set(buf, this.byteLength);
@@ -2025,14 +2089,7 @@
     seek.max = duration;
     seek.value = String(pos);
     var ahead = packedAhead();
-    if (ahead > bufTarget) ahead = bufTarget;
     if (ahead > duration - pos) ahead = Math.max(0, duration - pos);
-    // Keep the furthest buffered edge stable while the playhead consumes it.
-    // It grows when more data arrives and only disappears once playback has
-    // actually reached that edge (or a seek/restart resets the stream).
-    var observedEnd = pos + ahead;
-    if (observedEnd > bufEnd || pos >= bufEnd) bufEnd = observedEnd;
-    ahead = Math.max(0, bufEnd - pos);
     var playPct = pos / duration;
     if ($('seekPlay')) $('seekPlay').style.width = (playPct * 100) + '%';
     showSeekBuf(pos, ahead);
@@ -2043,6 +2100,7 @@
   }
 
   function stop(keepBox) {
+    cancelSeam();
     streamGen += 1;
     pipeTok += 1;
     if (relatedTimer) { clearTimeout(relatedTimer); relatedTimer = null; }
@@ -2087,6 +2145,7 @@
     updateStageLoader('');
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     bufEnd = 0;
+    measuredVideoBps = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
       fsOn = false;
@@ -2506,6 +2565,15 @@
     WA.prototype.play = function (rate, left, right) {
       // Keep the PCM. Dropping it advances the decoder without anything to
       // play, so the next sound after resume belongs to a later frame.
+      if (armingSeam || this._seamHold) {
+        if (!this._pending) this._pending = [];
+        this._pending.push({
+          rate: rate,
+          left: left.slice ? left.slice() : new Float32Array(left),
+          right: right.slice ? right.slice() : new Float32Array(right)
+        });
+        return;
+      }
       if (prerolling || paused) {
         if (!this._pending) this._pending = [];
         this._pending.push({
@@ -2676,6 +2744,14 @@
     var videoAhead = videoAheadSec();
     var packed = packedAhead();
     var queued = queuedAudio();
+    var audioDry = audioAhead < 0.08 && queued < 0.08;
+    var stalled = lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 2000;
+    // Video bytes can keep arriving after the sound is gone. Waiting on that
+    // same socket shows a loading state that never returns to playback.
+    if (audioDry && stalled && Date.now() - lastDeadVideoRestart >= 15000) {
+      restartDeadVideoStream('restart-audio-dry');
+      return;
+    }
     if (audioAhead > 1.0 || videoAhead > 1.0 || packed > 1.5 || queued > 0.8) {
       if (!lastRebufferSkipLog || Date.now() - lastRebufferSkipLog > 2000) {
         lastRebufferSkipLog = Date.now();
@@ -2751,6 +2827,11 @@
     if (!window.JSMpeg || !JSMpeg.Player || JSMpeg.Player.prototype.__pace) return;
     JSMpeg.Player.prototype.__pace = true;
     JSMpeg.Player.prototype.updateForStreaming = function () {
+      if (this._seam || (armingSeam && this !== player)) {
+        this._seam = true;
+        pumpSeam(this);
+        return;
+      }
       applyStreamHold();
       if (ended) return;
       if (readyToFinish()) {
@@ -2777,7 +2858,7 @@
       var recentResume = resumeAt && Date.now() - resumeAt < 4000;
       var naturalEnd = streamEnded && audioPendingSec() < 0.25;
       var socketQuiet = lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 12000;
-      if (stalledMs > 4000 && !recentResume && !naturalEnd && !(waitingOnBufferedVideo() && !socketQuiet)) {
+      if (!paused && stalledMs > 4000 && socketQuiet && !recentResume && !naturalEnd) {
         restartDeadVideoStream('restart-video-stalled', {
           stalledMs: stalledMs
         });
@@ -2926,38 +3007,7 @@
         onSourceCompleted: function () {
           if (isLive || nearEnd() || streamEnded) markStreamEnded();
         },
-        onVideoDecode: function () {
-          var decodeNow = Date.now();
-          if (lastVideoDecodeAt) lastFrameInterval = decodeNow - lastVideoDecodeAt;
-          if (rebuffering) rebufferVideoDecodeAt = decodeNow;
-          var frame = $('stageFrame');
-          if (frame) frame.className = 'stage-frame';
-          var loadingBg = $('stageLoadingBg');
-          if (loadingBg) loadingBg.className = 'stage-loading-bg';
-          if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
-          preservedStageFrame = '';
-          lastVideoDecodeAt = decodeNow;
-          if (!videoStartWall) {
-            videoStartWall = Date.now();
-            fitStage();
-            debugPlayback('first-video-frame', {
-              start: startAt,
-              videoTime: player && player.video ? player.video.currentTime : 0,
-              audioTime: playingSoundTime({ fallback: false }),
-              quality: quality,
-              bitrateMode: vbrLow ? 'low' : 'normal'
-            });
-          }
-          fpsCount++;
-            stageFrameReady = true;
-            updateStageLoader('');
-          var now = Date.now();
-          if (now - lastFps >= 1000) {
-            $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · ' + fpsCount + ' FPS';
-            fpsCount = 0;
-            lastFps = now;
-          }
-        }
+        onVideoDecode: function () { noteVideoFrame(); }
       });
       hardenBits(player.audio);
       hardenBits(player.video);
@@ -2986,6 +3036,234 @@
     } catch (e) {
       setStatus('플레이어 오류: ' + e.message);
     }
+  }
+
+  function noteVideoFrame() {
+    var decodeNow = Date.now();
+    if (lastVideoDecodeAt) lastFrameInterval = decodeNow - lastVideoDecodeAt;
+    if (rebuffering) rebufferVideoDecodeAt = decodeNow;
+    var frame = $('stageFrame');
+    if (frame) frame.className = 'stage-frame';
+    var loadingBg = $('stageLoadingBg');
+    if (loadingBg) loadingBg.className = 'stage-loading-bg';
+    if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
+    preservedStageFrame = '';
+    lastVideoDecodeAt = decodeNow;
+    if (!videoStartWall) {
+      videoStartWall = Date.now();
+      fitStage();
+      debugPlayback('first-video-frame', {
+        start: startAt,
+        videoTime: player && player.video ? player.video.currentTime : 0,
+        audioTime: playingSoundTime({ fallback: false }),
+        quality: quality,
+        bitrateMode: vbrLow ? 'low' : 'normal'
+      });
+    }
+    fpsCount++;
+    stageFrameReady = true;
+    updateStageLoader('');
+    var now = Date.now();
+    if (now - lastFps >= 1000) {
+      $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · ' + fpsCount + ' FPS';
+      fpsCount = 0;
+      lastFps = now;
+    }
+  }
+
+  function pumpSeam(pl) {
+    if (!pl) return;
+    if (seamPlayer && pl !== seamPlayer) return;
+    var out = pl.audioOut;
+    var pending = pendingAudioSec(out);
+    var n = 0;
+    while (out && pl.audio && pending < 2.5 && n < 6) {
+      if (!pl.audio.decode()) break;
+      pending = pendingAudioSec(out);
+      n++;
+    }
+    if (!seamHasFrame && pl.video && pl.video.decode && pl.video.decode()) seamHasFrame = true;
+    seamReady = !!(seamHasFrame && pending >= 1);
+  }
+
+  function cancelSeam() {
+    if (seamTimer) { clearInterval(seamTimer); seamTimer = null; }
+    var extra = seamPlayer;
+    seamPlayer = null;
+    seamReady = false;
+    seamHasFrame = false;
+    seamSpliceAt = 0;
+    seamStarted = 0;
+    if (extra) {
+      try { extra._seam = false; } catch (e0) {}
+      try { if (extra.audioOut) extra.audioOut._seamHold = false; } catch (e1) {}
+      try { extra.destroy(); } catch (e2) {}
+    }
+    if (seamCanvas && seamCanvas.parentNode) {
+      try { seamCanvas.parentNode.removeChild(seamCanvas); } catch (e3) {}
+    }
+    seamCanvas = null;
+  }
+
+  function showSeamCanvas(canvas) {
+    if (!canvas || !stage || !stage.parentNode) return;
+    canvas.id = 'stage';
+    canvas.className = stage.className;
+    canvas.style.cssText = stage.style.cssText;
+    stage.parentNode.insertBefore(canvas, stage);
+    stage.id = 'stage-old';
+    stage.style.display = 'none';
+    stage.parentNode.removeChild(stage);
+    stage = canvas;
+  }
+
+  function stopLiveSources(out) {
+    if (!out || !out._srcs) return;
+    while (out._srcs.length) {
+      var src = out._srcs.shift();
+      try { src.onended = null; } catch (e0) {}
+      try { if (src.stop) src.stop(0); } catch (e1) {}
+      try { src.disconnect(); } catch (e2) {}
+    }
+  }
+
+  function commitSeam() {
+    if (!seamPlayer || !player || player === seamPlayer) return;
+    var next = seamPlayer;
+    var canvas = seamCanvas;
+    var at = seamSpliceAt;
+    if (seamTimer) { clearInterval(seamTimer); seamTimer = null; }
+    seamPlayer = null;
+    seamCanvas = null;
+    seamReady = false;
+    seamHasFrame = false;
+    seamSpliceAt = 0;
+    next._seam = false;
+    if (next.audioOut) {
+      next.audioOut._seamHold = false;
+      next.audioOut.enabled = true;
+      next.audioOut.unlocked = true;
+    }
+    stopLiveSources(player.audioOut);
+    var old = player;
+    player = next;
+    startAt = at;
+    lastPlaybackPos = at;
+    bufEnd = at;
+    audioMediaCursor = 0;
+    lastHeard = 0;
+    pauseHeard = 0;
+    resumeHeard = 0;
+    resumePending = false;
+    if (next.audioOut) {
+      next.audioOut.startTime = 0;
+      next.audioOut._schedEndCtx = 0;
+      next.audioOut._schedEndMedia = 0;
+      next.audioOut._srcs = next.audioOut._srcs || [];
+      var ctx = next.audioOut.context;
+      var pending = next.audioOut._pending || [];
+      next.audioOut._pending = [];
+      if (ctx) next.audioOut.startTime = ctx.currentTime + 0.02;
+      var i;
+      for (i = 0; i < pending.length; i++) {
+        next.audioOut.play(pending[i].rate, pending[i].left, pending[i].right);
+      }
+    }
+    showSeamCanvas(canvas);
+    applyPlayerVol();
+    lastVideoDecodeAt = Date.now();
+    hookNetBytes(streamGen);
+    setTimeout(function () { if (player === next) hookNetBytes(streamGen); }, 200);
+    setTimeout(function () { if (player === next) hookNetBytes(streamGen); }, 1000);
+    try { old.destroy(); } catch (eOld) {}
+    fitStage();
+    debugPlayback('seamless-join', {
+      at: at,
+      queuedAudio: queuedAudio()
+    });
+  }
+
+  function watchSeam() {
+    if (!seamPlayer || !playing || ended) {
+      cancelSeam();
+      return;
+    }
+    if (paused) return;
+    var left = audioAheadSec();
+    if (seamReady && left < 0.45) {
+      commitSeam();
+      return;
+    }
+    if (left < 0.3 && !seamReady) {
+      var resumeSec = Math.max(0, currentPos() - 0.3);
+      cancelSeam();
+      playUrl(playing, resumeSec, { skipInfo: true });
+    }
+  }
+
+  function beginSeamlessReconnect() {
+    if (seamPlayer) return true;
+    if (!playing || !player || paused || ended || isLive) return false;
+    var remain = audioAheadSec();
+    if (!(remain >= 4)) return false;
+    var at = currentPos() + remain;
+    if (duration > 0 && at > duration - 1.5) return false;
+    seamSpliceAt = at;
+    seamReady = false;
+    seamHasFrame = false;
+    seamStarted = Date.now();
+    seamCanvas = document.createElement('canvas');
+    seamCanvas.width = stage.width || 640;
+    seamCanvas.height = stage.height || 360;
+    seamCanvas.setAttribute('aria-hidden', 'true');
+    seamCanvas.style.display = 'none';
+    if (stage && stage.parentNode) stage.parentNode.appendChild(seamCanvas);
+    armingSeam = true;
+    try {
+      var prefetch = null;
+      prefetch = new JSMpeg.Player(wsUrlFor(playing, at, true), {
+        canvas: seamCanvas,
+        audio: true,
+        streaming: true,
+        reconnectInterval: 0,
+        maxBufferSize: 8 * 1024 * 1024,
+        audioBufferSize: 2 * 1024 * 1024,
+        videoBufferSize: 4 * 1024 * 1024,
+        maxAudioLag: 4.5,
+        disableWebAssembly: true,
+        decodeFirstFrame: true,
+        pauseWhenHidden: false,
+        preserveDrawingBuffer: true,
+        disableWebAudio: false,
+        onVideoDecode: function () {
+          seamHasFrame = true;
+          if (player === prefetch) noteVideoFrame();
+        }
+      });
+      seamPlayer = prefetch;
+    } catch (eSeam) {
+      armingSeam = false;
+      cancelSeam();
+      return false;
+    }
+    armingSeam = false;
+    seamPlayer._seam = true;
+    if (seamPlayer.audioOut) {
+      seamPlayer.audioOut._seamHold = true;
+      seamPlayer.audioOut.volume = 0;
+      try { if (seamPlayer.audioOut.gain) seamPlayer.audioOut.gain.gain.value = 0; } catch (eGain) {}
+    }
+    hardenBits(seamPlayer.audio);
+    hardenBits(seamPlayer.video);
+    try {
+      seamPlayer.wantsToPlay = true;
+      seamPlayer.paused = false;
+      if (seamPlayer.play) seamPlayer.play();
+    } catch (ePlay) {}
+    if (seamTimer) clearInterval(seamTimer);
+    seamTimer = setInterval(watchSeam, 200);
+    debugPlayback('seamless-prefetch', { at: at, remain: remain });
+    return true;
   }
 
   function hookNetBytes(gen) {
@@ -3085,16 +3363,17 @@
         return;
       }
       if (!ended && playing && !paused && !streamEnded && !nearEnd() && !recoveringStream) {
-        if (Date.now() - lastSocketRestart >= 12000) {
-          lastSocketRestart = Date.now();
-          var resumeSec = Math.max(0, currentPos() - 0.5);
-          if (resumeSec < 5 && lastPlaybackPos >= 5) resumeSec = Math.max(0, lastPlaybackPos - 0.5);
-          setStatus('네트워크가 끊겨 재연결하는 중...');
-          setTimeout(function () {
-            if (gen !== streamGen || !playing || paused || ended || streamEnded) return;
-            playUrl(playing, resumeSec, { skipInfo: true });
-          }, 350);
-        }
+        if (Date.now() - lastSocketRestart < 12000) return;
+        lastSocketRestart = Date.now();
+        if (beginSeamlessReconnect()) return;
+        if (duration > 0 && currentPos() + audioAheadSec() >= duration - 0.8) return;
+        var resumeSec = Math.max(0, currentPos() - 0.5);
+        if (resumeSec < 5 && lastPlaybackPos >= 5) resumeSec = Math.max(0, lastPlaybackPos - 0.5);
+        setStatus('네트워크가 끊겨 재연결하는 중...');
+        setTimeout(function () {
+          if (gen !== streamGen || !playing || paused || ended || streamEnded) return;
+          playUrl(playing, resumeSec, { skipInfo: true });
+        }, 350);
         return;
       }
       if (!ended && playing && (streamEnded || nearEnd())) markStreamEnded();
@@ -3758,7 +4037,7 @@
   });
   bindToggleBtns('.bbtn', 'bbtn', function (el) {
     var n = parseInt(el.getAttribute('data-buf'), 10);
-    bufTarget = (n === 10 || n === 20 || n === 30) ? n : 10;
+    bufTarget = (n === 10 || n === 20 || n === 30) ? n : 20;
     applyStreamHold();
   }, false);
 
