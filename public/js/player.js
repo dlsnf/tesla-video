@@ -32,6 +32,7 @@
   var rebuffering = false;
   var lastStreamErr = '';
   var netBytes = 0;
+  var lastNetGrowthAt = 0;
   var pauseNet0 = -1;
   var streamHeld = false;
   var needStreamRestart = false;
@@ -1458,6 +1459,18 @@
     playUrl(playing, sec, { skipInfo: true, recovery: true });
   }
 
+  // Video bytes can sit unread while playback waits on the next audio packet.
+  // That is a short gap, not a dead stream, as long as picture and sound
+  // still agree.
+  function waitingOnBufferedVideo() {
+    if (videoAheadSec() < 1) return false;
+    if (audioAheadSec() >= 0.2 || queuedAudio() >= 0.2) return false;
+    var vt = player && player.video && isFinite(player.video.currentTime) ? player.video.currentTime : 0;
+    var heard = playingSoundTime({ fallback: false });
+    if (heard > 0 && Math.abs(vt - heard) > 0.5) return false;
+    return true;
+  }
+
   function markCaughtUp() {
     if (resumePending && !liveClockReady()) return;
     videoCatching = false;
@@ -2663,15 +2676,6 @@
     var videoAhead = videoAheadSec();
     var packed = packedAhead();
     var queued = queuedAudio();
-    // A full video buffer with no audio and no new frames is not a cushion.
-    // The picture is stuck, and waiting here used to end in a restart at 0.
-    var videoStalled = lastVideoDecodeAt > 0 && Date.now() - lastVideoDecodeAt > 1500;
-    var audioEmpty = audioAhead < 0.08 && queued < 0.08;
-    var nearTitleEnd = duration > 0 && currentPos() > duration - 3;
-    if (videoStalled && audioEmpty && videoAhead > 1 && !nearTitleEnd && !(resumeAt && Date.now() - resumeAt < 4000)) {
-      restartDeadVideoStream('restart-audio-starved');
-      return;
-    }
     if (audioAhead > 1.0 || videoAhead > 1.0 || packed > 1.5 || queued > 0.8) {
       if (!lastRebufferSkipLog || Date.now() - lastRebufferSkipLog > 2000) {
         lastRebufferSkipLog = Date.now();
@@ -2769,9 +2773,13 @@
         restartDeadVideoStream('restart-no-video-first-frame');
         return;
       }
-      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000 && !(resumeAt && Date.now() - resumeAt < 4000) && !(streamEnded && audioPendingSec() < 0.25)) {
+      var stalledMs = lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : 0;
+      var recentResume = resumeAt && Date.now() - resumeAt < 4000;
+      var naturalEnd = streamEnded && audioPendingSec() < 0.25;
+      var socketQuiet = lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 12000;
+      if (stalledMs > 4000 && !recentResume && !naturalEnd && !(waitingOnBufferedVideo() && !socketQuiet)) {
         restartDeadVideoStream('restart-video-stalled', {
-          stalledMs: Date.now() - lastVideoDecodeAt
+          stalledMs: stalledMs
         });
         return;
       }
@@ -2856,6 +2864,7 @@
     lastFps = Date.now();
     videoStartWall = 0;
     netBytes = 0;
+    lastNetGrowthAt = Date.now();
     pauseNet0 = -1;
     audioMediaCursor = 0;
     videoShownAt = 0;
@@ -3042,7 +3051,10 @@
         return;
       }
       try {
-        if (ev && ev.data && ev.data.byteLength) netBytes += ev.data.byteLength;
+        if (ev && ev.data && ev.data.byteLength) {
+          netBytes += ev.data.byteLength;
+          lastNetGrowthAt = Date.now();
+        }
       } catch (e) {}
       orig(ev);
     };
