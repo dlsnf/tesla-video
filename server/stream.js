@@ -279,6 +279,11 @@ function encodeTs(info, timestampOffset) {
     '-flush_packets', '0',
     '-muxdelay', '0',
     '-muxpreload', '0',
+    '-stats',
+    '-stats_period', '1',
+    // Do not emit video more than 0.25s ahead of audio. A larger gap delivers
+    // video-only bytes, the sound buffer stays empty, and the picture freezes.
+    '-max_interleave_delta', '250000',
     'pipe:1',
   ];
 }
@@ -614,7 +619,6 @@ function attachWsStream(ws, input, quality, start, extra) {
           return;
         }
         var sourceRejected = sourceRejectedSeen || /403|forbidden|http error/i.test(errBuf);
-        var streamFailed = code != null && code !== 0;
         // An empty, clean close after a VOD seek is a known CDN range edge
         // case. Do not retry the same request and then mark playback ended;
         // switch the client to the yt-dlp section-reader fallback instead.
@@ -623,7 +627,10 @@ function attachWsStream(ws, input, quality, start, extra) {
           closeAfterDrain({ type: 'seek-retry', mode: 'legacy' });
           return;
         }
-        if ((mpegSent < 8000 || sourceRejected || streamFailed) && encodeAttempt < 2) {
+        // Only retry inside this socket when the client has not received a real
+        // stream yet. After playback is underway, a late exit must not start a
+        // second encode into the same player.
+        if (mpegSent < 8000 && encodeAttempt < 2) {
           encodeAttempt += 1;
           try { media.invalidateSource(info && info.id); } catch (eInv) {}
           sendStatus(ws, parseStart(start) > 2 ? '지정한 위치부터 다시 받는 중...' : '다시 연결하는 중...');
@@ -652,8 +659,11 @@ function attachWsStream(ws, input, quality, start, extra) {
           sendJson(ws, { type: 'error', message: '지정한 위치의 영상을 받지 못했습니다' });
         } else {
           var expectedSec = Math.max(0, (info.duration || 0) - parseStart(start));
+          // lastEncodedSec stays 0 when ffmpeg's progress line was not seen.
+          // A clean exit after a long send is the title finishing, not a failed seek.
           var shortOutput = !code && !legacySeek && expectedSec > 15
-            && (!lastEncodedSec || lastEncodedSec < expectedSec - 4);
+            && lastEncodedSec > 0
+            && lastEncodedSec < expectedSec - 4;
           if (parseStart(start) > 2) {
             sendJson(ws, {
               type: 'seek-debug',
