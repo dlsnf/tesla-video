@@ -10,13 +10,17 @@
   var pauseUnread = -1;
   var resumeAt = 0;
   var lastHeard = 0;
+  var lastPlaybackPos = 0;
   var resumeHeard = 0;
   var resumePending = false;
   var resumeSyncTimer = null;
-  var AUDIO_QUEUE_SEC = 3.5;
+  var AUDIO_QUEUE_SEC = 4;
+  var SEEK_AUDIO_PREROLL_SEC = 2.5;
   var PREROLL_SEC = 1.5;
   var bufTarget = 10;
   var VIDEO_CATCH_FRAMES = 2;
+  var VIDEO_CATCH_MAX_FRAMES = 24;
+  var SYNC_INTERVAL_MS = 250;
   var prerolling = false;
   var prerollAt = 0;
   var rebuffering = false;
@@ -38,6 +42,8 @@
   var lastSyncRestart = 0;
   var videoCatching = false;
   var useHttpAudio = false, videoStartWall = 0;
+  var audioGatePending = false;
+  var audioStartedWall = 0;
   var fsOn = false, tapHide = null;
   var soundUnlockBound = false, soundResyncing = false, wantSoundHint = false;
   var currentFeed = 'home';
@@ -136,6 +142,7 @@
     lastQuery = '';
     if ($('q')) $('q').value = '';
     if ($('qWatch')) $('qWatch').value = '';
+    if ($('qWatchTab')) $('qWatchTab').value = '';
   }
 
   function saveBrowseState() {
@@ -1038,6 +1045,7 @@
 
   function playingSoundTime(opts) {
     var allowFallback = !(opts && opts.fallback === false);
+    if (useHttpAudio && na && !na.paused && isFinite(na.currentTime)) return rememberHeard(na.currentTime);
     try {
       if (!player || !player.audioOut || !player.audioOut.context) {
         if (!allowFallback) return 0;
@@ -1108,6 +1116,7 @@
   function restartDeadVideoStream(reason, extra) {
     if (ended || streamEnded || paused || prerolling || !playing || !player) return;
     if (Date.now() - lastDeadVideoRestart < 15000) return;
+    if (videoAheadSec() > 0.5 || packedAhead() > 0.35) return;
     var sec = Math.max(0, (currentPos() || 0) - 0.5);
     lastDeadVideoRestart = Date.now();
     debugPlayback(reason || 'restart-dead-video', Object.assign({
@@ -1144,7 +1153,10 @@
       return;
     }
     if (heard - vt > 0.08) videoCatching = true;
-    var cap = videoCatching ? VIDEO_CATCH_FRAMES : 1;
+    var lag = Math.max(0, heard - vt);
+    var cap = videoCatching
+      ? Math.min(VIDEO_CATCH_MAX_FRAMES, Math.max(VIDEO_CATCH_FRAMES, Math.ceil(lag * fps * 1.5)))
+      : 1;
     var i = 0;
     while (i < cap) {
       heard = targetHeard();
@@ -1208,19 +1220,30 @@
   }
 
   function currentPos() {
-    if (paused && pausePos >= 0) return pausePos;
+    if (paused && pausePos >= 0) {
+      lastPlaybackPos = pausePos;
+      return pausePos;
+    }
     var heard = playingSoundTime();
     if (heard > 0.04) {
       pausePos = -1;
-      return startAt + heard;
+      lastPlaybackPos = startAt + heard;
+      return lastPlaybackPos;
     }
-    if (pausePos >= 0) return pausePos;
+    if (pausePos >= 0) {
+      lastPlaybackPos = pausePos;
+      return pausePos;
+    }
     try {
       if (player && player.video && isFinite(player.video.currentTime) && player.video.currentTime > 0) {
-        return startAt + player.video.currentTime;
+        lastPlaybackPos = startAt + player.video.currentTime;
+        return lastPlaybackPos;
       }
     } catch (e) {}
-    if (clock0) return startAt + (Date.now() - clock0) / 1000;
+    if (clock0) {
+      lastPlaybackPos = startAt + (Date.now() - clock0) / 1000;
+      return lastPlaybackPos;
+    }
     return startAt;
   }
 
@@ -1429,8 +1452,22 @@
     };
   }
 
+  function paintAudioBuffer() {
+    var bar = $('audioBuf');
+    if (!bar) return;
+    var ahead = 0;
+    try {
+      if (useHttpAudio && na && na.buffered && na.buffered.length) {
+        ahead = Math.max(0, na.buffered.end(na.buffered.length - 1) - na.currentTime);
+      } else ahead = queuedAudio();
+    } catch (e) { ahead = 0; }
+    bar.style.width = Math.min(100, (ahead / 30) * 100) + '%';
+    bar.setAttribute('title', '음원 버퍼 ' + Math.round(ahead) + '초');
+  }
+
   function paintSeekBar() {
     if (seeking) return;
+    paintAudioBuffer();
     var seek = $('seek');
     var wrap = $('seekWrap');
     if (!seek) return;
@@ -1512,6 +1549,7 @@
     stop(true);
     playing = src;
     startAt = seek || 0;
+    lastPlaybackPos = startAt;
     bufEnd = startAt;
     if (keepPaused) {
       paused = true;
@@ -1643,16 +1681,27 @@
 
   function startHttpAudio(src) {
     if (!na) return;
+    useHttpAudio = true;
+    audioGatePending = true;
+    audioStartedWall = 0;
+    try { na.pause(); } catch (e0) {}
+    na.autoplay = false;
     var q = '&quality=' + quality + '&start=' + encodeURIComponent(String(startAt));
-    na.preload = 'none';
+    na.preload = 'auto';
     na.src = tv.url('/api/audio?url=' + encodeURIComponent(src) + q + '&_=' + Date.now());
     na.load();
-    (function tryPlay() { if (na) na.play().catch(function () { setTimeout(tryPlay, 120); }); })();
+  }
+
+  function audioBufferedSec() {
+    if (!useHttpAudio || !na || !na.buffered || !na.buffered.length) return 0;
+    try { return Math.max(0, na.buffered.end(na.buffered.length - 1) - na.currentTime); }
+    catch (e) { return 0; }
   }
 
   var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
   function isAudioLive() {
+    if (useHttpAudio && na) return !na.paused && na.currentTime > 0.15;
     try {
       var out = player && player.audioOut;
       if (!out || !out.context) return false;
@@ -1737,11 +1786,15 @@
   }
 
   function startPipes(src) {
-    useHttpAudio = false;
+    useHttpAudio = true;
     videoStartWall = 0;
+    audioGatePending = false;
+    audioStartedWall = 0;
     unlockAudio();
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+    if (!paused) startHttpAudio(src);
     launchPlayer(wsUrlFor(src, startAt));
+    if (player && player.audioOut) player.audioOut.enabled = false;
     if (paused) {
       holdPlayback();
       videoStartWall = Date.now();
@@ -1810,7 +1863,7 @@
     syncTimer = setInterval(function () {
       if (!playing || paused) return;
       requestSoundSync();
-    }, 2000);
+    }, SYNC_INTERVAL_MS);
 
     setStatus(paused ? '일시정지 · 미리 받는 중' : '불러오는 중');
   }
@@ -1930,6 +1983,21 @@
       if (!(out.startTime > now)) out.startTime = now;
       if (ctx && ctx.state !== 'running' && ctx.resume) ctx.resume();
     } catch (e0) {}
+    if (useHttpAudio && na) {
+      try {
+        na.currentTime = 0;
+        var playPromise = na.play();
+        audioGatePending = false;
+        audioStartedWall = Date.now();
+        if (playPromise && playPromise.catch) playPromise.catch(function () {
+          audioGatePending = true;
+          audioStartedWall = 0;
+        });
+      } catch (eAudio) {
+        audioGatePending = true;
+        audioStartedWall = 0;
+      }
+    }
     var i;
     for (i = 0; i < pend.length; i++) {
       out.play(pend[i].rate, pend[i].left, pend[i].right);
@@ -1989,14 +2057,14 @@
         return;
       }
       if (prerolling) {
-        var need = isLive ? 0.8 : PREROLL_SEC;
+        var need = isLive ? 0.8 : (startAt > 2 || rebuffering ? SEEK_AUDIO_PREROLL_SEC : PREROLL_SEC);
         var n = 0;
-        while (this.audio && pendingAudioSec(this.audioOut) < need && n < 24) {
+        while (!useHttpAudio && this.audio && pendingAudioSec(this.audioOut) < need && n < 24) {
           n++;
           if (!this.audio.decode()) break;
         }
         if (this.video && this.video.currentTime === 0) this.video.decode();
-        var readyA = pendingAudioSec(this.audioOut);
+        var readyA = useHttpAudio ? audioBufferedSec() : pendingAudioSec(this.audioOut);
         var readyV = this.video && this.video.currentTime > 0;
         var waited = prerollAt ? (Date.now() - prerollAt) : 0;
         var minA = rebuffering ? 0.8 : 0.3;
@@ -2013,6 +2081,7 @@
           return;
         }
       }
+      if (useHttpAudio && !isAudioLive()) return;
       if (this.audio && this.audioOut && this.audioOut.enabled) {
         var queued = this.audioOut.enqueuedTime || 0;
         var n2 = 0;
@@ -2248,6 +2317,7 @@
     player.paused = false;
     unlockPlaybackAudio();
     if (!player.animationId && player.play) player.play();
+    if (useHttpAudio && na) { try { na.play().catch(function () {}); } catch (eAudio) {} }
     skipVideoToSound(player);
     scheduleResumeSync(0);
   }

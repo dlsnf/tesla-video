@@ -1,10 +1,10 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var stage = $('stage'), na = $('na'), st = $('st'), list = $('list');
-  var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, streamFormat = '243+140', startAt = 0;
+  var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, streamFormat = '134+140', startAt = 0;
   var preservedStageFrame = '';
   var stageFrameReady = false, stagePrerollReady = false;
-  var duration = 0, isLive = false, clock0 = 0, fpsCount = 0, lastFps = 0;
+  var duration = 0, isLive = false, fpsCount = 0, lastFps = 0;
   var bufEnd = 0;
   var paused = false, tickTimer = null, syncTimer = null, forceTimer = null, audioTimer = null;
   var pausePos = -1;
@@ -13,13 +13,19 @@
   var pauseUnread = -1;
   var resumeAt = 0;
   var lastHeard = 0;
+  var lastPlaybackPos = 0;
   var resumeHeard = 0;
   var resumePending = false;
   var resumeSyncTimer = null;
+  // Keep enough real audio cushion to absorb transport jitter without letting
+  // a long scheduled queue make video recovery visibly late.
   var AUDIO_QUEUE_SEC = 2.5;
-  var PREROLL_SEC = 1.5;
+  var SEEK_AUDIO_PREROLL_SEC = 3;
+  var PREROLL_SEC = 3;
   var bufTarget = 10;
   var VIDEO_CATCH_FRAMES = 2;
+  var VIDEO_CATCH_MAX_FRAMES = 24;
+  var SYNC_INTERVAL_MS = 250;
   var prerolling = false;
   var prerollAt = 0;
   var prerollTimer = null;
@@ -36,9 +42,10 @@
   var repeatEnabled = false;
   var repeatTimer = null;
   var repeatAt = 0;
+  var endCoastFrom = 0;
+  var endCoastPos = 0;
 
   function updateRepeatButton() {
-  if (commentsOffset === 0 && list) list.innerHTML = '';
     var button = $('btnRepeat');
     if (!button) return;
     button.classList.toggle('on', repeatEnabled);
@@ -71,7 +78,8 @@
   var driftAlerted = false;
   var videoLeadSince = 0;
   var videoCatching = false;
-  var useHttpAudio = false, videoStartWall = 0;
+  var audioStarvedSince = 0;
+  var videoStartWall = 0;
   var fsOn = false, tapHide = null, fsControlsTimer = null;
   var soundUnlockBound = false, soundResyncing = false, wantSoundHint = false;
   var currentFeed = 'home';
@@ -131,6 +139,13 @@
     return Math.floor(hour / 24) + '일 전';
   }
 
+  function commentLikes(value) {
+    if (value == null || value === '') return '좋아요 정보 없음';
+    var n = Number(value);
+    if (!isFinite(n)) return String(value);
+    return n.toLocaleString('ko-KR');
+  }
+
   function commentHtml(item) {
     var meta = '';
     var when = commentTime(item.time, item.timeText);
@@ -144,7 +159,7 @@
       + '<div class="comment-author">' + escapeHtml(author) + '<span class="comment-meta">' + escapeHtml(meta) + '</span></div>'
       + '<div class="comment-text">' + escapeHtml(item.text || '') + '</div>'
       + '<div class="comment-actions"><button type="button" aria-label="좋아요"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10v10H4V10h3zm3 10h7.2c.8 0 1.5-.5 1.8-1.3l1.5-5.2c.3-1-.5-2-1.5-2H14l.7-3.4.1-.6c0-.4-.2-.8-.5-1.1L13 5l-5 5v10h2z"/></svg></button>'
-      + '<span class="comment-like-count">' + escapeHtml(item.likes == null ? '확인 불가' : String(item.likes)) + '</span><button type="button" aria-label="싫어요"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 14V4h3v10h-3zm-3-10H6.8C6 4 5.3 4.5 5 5.3l-1.5 5.2c-.3 1 .5 2 1.5 2H10l-.7 3.4-.1.6c0 .4.2.8.5 1.1L11 19l5-5V4h-2z"/></svg></button><button class="comment-reply" type="button">답글</button></div>'
+      + '<span class="comment-like-count">' + escapeHtml(commentLikes(item.likes)) + '</span><button type="button" aria-label="싫어요"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 14V4h3v10h-3zm-3-10H6.8C6 4 5.3 4.5 5 5.3l-1.5 5.2c-.3 1 .5 2 1.5 2H10l-.7 3.4-.1.6c0 .4.2.8.5 1.1L11 19l5-5V4h-2z"/></svg></button><button class="comment-reply" type="button">답글</button></div>'
       + '</div></article>';
   }
 
@@ -155,17 +170,22 @@
     state.className = 'comments-state' + (loading ? ' loading' : '');
   }
 
+  function renderCommentsLoading(message) {
+    var list = $('commentsList');
+    if (!list || list.children.length) return;
+    var label = message || '댓글을 불러오는 중...';
+    list.innerHTML = '<div class="comments-loading-card" aria-live="polite">'
+      + '<span class="comments-loading-spinner" aria-hidden="true"></span>'
+      + '<strong>' + escapeHtml(label) + '</strong><span>댓글 정보와 좋아요 수를 가져오고 있습니다</span></div>'
+      + '<div class="comment-skeleton"><i></i><div><b></b><em></em><em></em></div></div>'
+      + '<div class="comment-skeleton"><i></i><div><b></b><em></em><em></em></div></div>';
+  }
+
   function updateCommentSortButtons() {
     var buttons = document.querySelectorAll('[data-comment-sort]');
-    var activeKind = (commentsSort === 'new' || commentsSort === 'new-asc') ? 'new' : 'top';
-    var ascActive = commentsSort === 'top-asc' || commentsSort === 'new-asc';
     for (var i = 0; i < buttons.length; i++) {
-      var base = buttons[i].getAttribute('data-comment-sort');
-      var selected = base === activeKind;
+      var selected = buttons[i].getAttribute('data-comment-sort') === commentsSort;
       buttons[i].className = 'comment-sort' + (selected ? ' on' : '');
-      buttons[i].textContent = base === 'top'
-        ? (selected && ascActive ? '비인기순' : '인기순')
-        : (selected && ascActive ? '과거순' : '최신순');
       buttons[i].setAttribute('aria-pressed', selected ? 'true' : 'false');
     }
   }
@@ -196,8 +216,7 @@
     if (!commentsId || commentsLoading) return;
     var requestSeq = ++commentsRequestSeq;
     commentsLoading = true;
-    var state = $('commentsState');
-    if (!previewOnly) setCommentsState('댓글을 불러오는 중...', true);
+    if (!previewOnly && commentsOffset === 0) setCommentsState('', false);
     tv.get('/api/youtube/comments?id=' + encodeURIComponent(commentsId) + '&limit=' + (limit || 10) + '&offset=' + commentsOffset + '&sort=' + commentsSort, function (code, data) {
       if (requestSeq !== commentsRequestSeq) return;
       commentsLoading = false;
@@ -210,10 +229,18 @@
       if (previewOnly) {
         if ($('commentsPreviewText')) $('commentsPreviewText').textContent = items[0] ? ((items[0].author || '사용자') + ' · ' + items[0].text) : '댓글이 없습니다';
         commentsMore = !!data.more;
-        if (commentsOpened && $('commentsList') && !$('commentsList').children.length) loadComments(10, false);
+        if (commentsOpened && $('commentsList')) {
+          $('commentsList').innerHTML = '';
+          loadComments(10, false);
+        }
         return;
       }
-      if (commentsOffset === 0) commentsCache[commentsSort] = [];
+      if (commentsOffset === 0) {
+        commentsCache[commentsSort] = [];
+        // Replace the initial loading card instead of appending comments
+        // beneath it.
+        if ($('commentsList')) $('commentsList').innerHTML = '';
+      }
       commentsCache[commentsSort] = commentsCache[commentsSort].concat(items);
       var list = $('commentsList');
       if (list) {
@@ -230,7 +257,13 @@
     commentsOpened = true;
     var panel = $('commentsPanel');
     if (panel) panel.hidden = false;
-    if (!$('commentsList') || !$('commentsList').children.length) loadComments(10, false);
+    if (commentsLoading) {
+      renderCommentsLoading();
+      setCommentsState('', false);
+    } else if (!$('commentsList') || !$('commentsList').children.length) {
+      renderCommentsLoading();
+      loadComments(10, false);
+    }
     prefetchComments('new');
   }
 
@@ -241,22 +274,35 @@
   }
 
   function setCommentSort(sort) {
-    var kind = sort === 'new' ? 'new' : 'top';
     if (!commentsOpened) return;
-    commentsSort = commentsSort === kind ? kind + '-asc' : kind;
+    if (!/^(?:top|top-asc|new|new-asc)$/.test(sort) || commentsSort === sort) return;
+    commentsSort = sort;
     commentsRequestSeq++;
     commentsLoading = false;
     commentsOffset = 0;
     commentsMore = false;
     updateCommentSortButtons();
-    if ($('commentsList')) $('commentsList').scrollTop = 0;
-    setCommentsState('댓글 정렬 중...', true);
+    if ($('commentsList')) {
+      $('commentsList').scrollTop = 0;
+      // Sorting always replaces the list: never leave comments in the old
+      // order visible while the selected order is being prepared.
+      $('commentsList').innerHTML = '';
+    }
+    renderCommentsLoading('댓글 정렬 중...');
+    setCommentsState('', false);
+    var kind = sort.indexOf('new') === 0 ? 'new' : 'top';
     if (commentsPrefetching[kind] && commentsSort === kind) return;
     if (commentsCache[commentsSort] && commentsCache[commentsSort].length) {
-      commentsOffset = commentsCache[commentsSort].length;
-      if ($('commentsList')) $('commentsList').innerHTML = commentsCache[commentsSort].map(commentHtml).join('');
-      commentsMore = true;
-      setCommentsState('아래로 내리면 더 불러옵니다', false);
+      var cachedSort = commentsSort;
+      // Keep a short visible loading transition even for an already fetched
+      // sort, so the order change is clear and old comments never flash back.
+      setTimeout(function () {
+        if (!commentsOpened || commentsSort !== cachedSort || !commentsCache[cachedSort]) return;
+        commentsOffset = commentsCache[cachedSort].length;
+        if ($('commentsList')) $('commentsList').innerHTML = commentsCache[cachedSort].map(commentHtml).join('');
+        commentsMore = true;
+        setCommentsState('아래로 내리면 더 불러옵니다', false);
+      }, 120);
       return;
     }
     loadComments(10, false);
@@ -269,7 +315,9 @@
       commentsPrefetching[sort] = false;
       if (!data || !data.ok) return;
       commentsCache[sort] = data.items || [];
-      if (commentsOpened && (commentsSort === sort || commentsSort === sort + '-asc') && $('commentsList')) {
+      // A prefetched descending list must never replace an active ascending
+      // sort; the ascending request has its own server-side ordering.
+      if (commentsOpened && commentsSort === sort && $('commentsList')) {
         commentsOffset = commentsCache[sort].length;
         commentsMore = !!data.more;
         $('commentsList').innerHTML = commentsCache[sort].map(commentHtml).join('');
@@ -413,6 +461,7 @@
     lastQuery = '';
     if ($('q')) $('q').value = '';
     if ($('qWatch')) $('qWatch').value = '';
+    if ($('qWatchTab')) $('qWatchTab').value = '';
   }
 
   function saveBrowseState() {
@@ -1320,51 +1369,24 @@
     return t;
   }
 
-  function decoderSoundTime() {
+  // Playhead of samples actually handed to the audio device.
+  // Decoder time runs ahead while a rebuffer is only queued, and the wall
+  // clock keeps moving through a stall. Neither matches what is audible.
+  function speakerHeard() {
     try {
-      if (!player || !player.audio || !player.audioOut) return 0;
-      var t = player.audio.currentTime;
-      if (t > 0 && isFinite(t)) return t;
-    } catch (e) {}
-    return 0;
+      var out = player && player.audioOut;
+      if (!out || !out.context || !(out._schedEndMedia > 0) || out._schedEndCtx == null) return 0;
+      var ahead = out._schedEndCtx - out.context.currentTime;
+      if (ahead < 0) ahead = 0;
+      var heard = out._schedEndMedia - ahead;
+      return heard > 0 && isFinite(heard) ? heard : 0;
+    } catch (e) { return 0; }
   }
 
   function playingSoundTime(opts) {
     var allowFallback = !(opts && opts.fallback === false);
-    try {
-      if (!player || !player.audioOut || !player.audioOut.context) {
-        if (!allowFallback) return 0;
-        if (lastHeard > 0) return lastHeard;
-        return pauseHeard > 0 ? pauseHeard : 0;
-      }
-      var now = player.audioOut.context.currentTime;
-      var srcs = player.audioOut._srcs || [];
-      var i, s, live = null, past = 0, nextAt = 0, nextMedia = 0;
-      for (i = 0; i < srcs.length; i++) {
-        s = srcs[i];
-        if (s._ctxAt == null || s._dur == null || s._mediaAt == null) continue;
-        if (now >= s._ctxAt && now < s._ctxAt + s._dur) {
-          live = s._mediaAt + (now - s._ctxAt);
-          break;
-        }
-        if (now >= s._ctxAt + s._dur) {
-          var atEnd = s._mediaAt + s._dur;
-          if (atEnd > past) past = atEnd;
-        } else if (now < s._ctxAt && (!nextAt || s._ctxAt < nextAt)) {
-          nextAt = s._ctxAt;
-          nextMedia = s._mediaAt;
-        }
-      }
-      if (live != null) return rememberHeard(live);
-      if (nextAt) {
-        var pred = nextMedia - (nextAt - now);
-        if (pred > 0) return rememberHeard(pred);
-        if (nextMedia > 0) return rememberHeard(nextMedia);
-      }
-      if (past > 0) return rememberHeard(past);
-      var dec = decoderSoundTime();
-      if (dec > 0) return rememberHeard(dec);
-    } catch (e) {}
+    var heard = speakerHeard();
+    if (heard > 0) return rememberHeard(heard);
     if (!allowFallback) return 0;
     if (lastHeard > 0) return lastHeard;
     if (pauseHeard > 0) return pauseHeard;
@@ -1469,7 +1491,10 @@
       return;
     }
     if (heard - vt > 0.08) videoCatching = true;
-    var cap = videoCatching ? VIDEO_CATCH_FRAMES : 1;
+    var lag = Math.max(0, heard - vt);
+    var cap = videoCatching
+      ? Math.min(VIDEO_CATCH_MAX_FRAMES, Math.max(VIDEO_CATCH_FRAMES, Math.ceil(lag * fps * 1.5)))
+      : 1;
     var i = 0;
     while (i < cap) {
       heard = targetHeard();
@@ -1573,21 +1598,50 @@
     }, 50);
   }
 
-  function currentPos() {
-    if (paused && pausePos >= 0) return pausePos;
+  function audiblePos() {
     var heard = playingSoundTime();
-    if (heard > 0.04) {
-      pausePos = -1;
-      return startAt + heard;
+    if (heard > 0.02) return startAt + heard;
+    if (pausePos >= 0) return pausePos;
+    return lastPlaybackPos >= startAt ? lastPlaybackPos : startAt;
+  }
+
+  function currentPos() {
+    if (paused && pausePos >= 0) {
+      lastPlaybackPos = pausePos;
+      return pausePos;
+    }
+    var pos = audiblePos();
+    // The title length can be a little longer than the last audible sample.
+    // Keep the seconds moving to that label before the repeat countdown,
+    // and only after nothing is left to play.
+    if (streamEnded && !isLive && duration > 0 && audioPendingSec() < 0.25) {
+      var gap = duration - pos;
+      if (gap > 0.05 && gap <= 2.5) {
+        if (!endCoastFrom) {
+          endCoastFrom = Date.now();
+          endCoastPos = pos;
+        }
+        var coast = endCoastPos + (Date.now() - endCoastFrom) / 1000;
+        if (coast > pos) pos = coast;
+        if (pos > duration) pos = duration;
+      } else if (gap <= 0.05) {
+        endCoastFrom = 0;
+      }
+    } else {
+      endCoastFrom = 0;
+    }
+    if (pos > 0.02) {
+      // A seek replaces lastPlaybackPos before the new stream starts. Inside
+      // one stream the audible clock only moves forward. Any backward step
+      // would flip the displayed second.
+      if (!(lastPlaybackPos > startAt + 0.25 && pos < lastPlaybackPos)) {
+        pausePos = -1;
+        lastPlaybackPos = pos;
+      }
+      return lastPlaybackPos;
     }
     if (pausePos >= 0) return pausePos;
-    try {
-      if (player && player.video && isFinite(player.video.currentTime) && player.video.currentTime > 0) {
-        return startAt + player.video.currentTime;
-      }
-    } catch (e) {}
-    if (clock0) return startAt + (Date.now() - clock0) / 1000;
-    return startAt;
+    return lastPlaybackPos >= startAt ? lastPlaybackPos : startAt;
   }
 
   function fmtPlayClock(sec) {
@@ -1631,13 +1685,14 @@
 
   function videoByteRate() {
     var kb = 600;
-    if (quality >= 720) kb = vbrLow ? 1000 : 1500;
-    else if (quality >= 480) kb = vbrLow ? 700 : 1000;
+    if (quality >= 720) kb = vbrLow ? 1800 : 3000;
+    else if (quality >= 480) kb = vbrLow ? 1100 : 1800;
     else kb = vbrLow ? 400 : 600;
     return (kb * 1000) / 8;
   }
 
   function outHeight() {
+    if (quality >= 720) return 720;
     return quality >= 480 ? 480 : 360;
   }
 
@@ -1678,7 +1733,36 @@
 
   function nearEnd() {
     if (isLive || !(duration > 0)) return false;
+    // A socket close this close to the title is the file finishing, not a
+    // stall. It must not start the repeat countdown by itself.
     return currentPos() >= Math.max(0, duration - 1.5);
+  }
+
+  function audioPendingSec() {
+    return Math.max(0, bufferLeftSec(player && player.audio, 24000) + queuedAudio());
+  }
+
+  function readyToFinish() {
+    if (isLive || !streamEnded) return false;
+    if (audioPendingSec() >= 0.25) return false;
+    if (!(duration > 0)) return true;
+    var gap = duration - audiblePos();
+    if (gap > 2.5) return true;
+    return currentPos() >= duration - 0.2;
+  }
+
+  function flushDemuxTail() {
+    try {
+      var demux = player && player.demuxer;
+      var info = demux && demux.pesPacketInfo;
+      if (!info || !demux.packetComplete) return;
+      var ids = Object.keys(info);
+      var i;
+      for (i = 0; i < ids.length; i++) {
+        var pkt = info[ids[i]];
+        if (pkt && pkt.currentLength > 0 && pkt.buffers && pkt.buffers.length) demux.packetComplete(pkt);
+      }
+    } catch (e) {}
   }
 
   function disableReconnect() {
@@ -1697,10 +1781,6 @@
     if (isLive || ended) return;
     streamEnded = true;
     disableReconnect();
-  }
-
-  function supplyDrained() {
-    return queuedAudio() < 0.2 && packedAhead() < 0.15;
   }
 
   function finishPlayback() {
@@ -1734,7 +1814,14 @@
       repeatTimer = null;
       repeatAt = 0;
       if (!repeatEnabled || !src || playing !== src || !ended) return;
-      playUrl(src, 0, { skipInfo: true });
+      // A repeat is always a new stream from zero. Clear the retained canvas
+      // frame too, so a late first frame cannot look like a mid-video restart.
+      preservedStageFrame = '';
+      if (stage) {
+        try { stage.width = stage.width; } catch (eClear) {}
+      }
+      debugPlayback('repeat-restart', { requestedStart: 0, lastPosition: lastPlaybackPos });
+      playUrl(src, 0, { skipInfo: false, repeat: true });
     }, 3000);
   }
 
@@ -1903,7 +1990,12 @@
     var ahead = packedAhead();
     if (ahead > bufTarget) ahead = bufTarget;
     if (ahead > duration - pos) ahead = Math.max(0, duration - pos);
-    bufEnd = pos + ahead;
+    // Keep the furthest buffered edge stable while the playhead consumes it.
+    // It grows when more data arrives and only disappears once playback has
+    // actually reached that edge (or a seek/restart resets the stream).
+    var observedEnd = pos + ahead;
+    if (observedEnd > bufEnd || pos >= bufEnd) bufEnd = observedEnd;
+    ahead = Math.max(0, bufEnd - pos);
     var playPct = pos / duration;
     if ($('seekPlay')) $('seekPlay').style.width = (playPct * 100) + '%';
     showSeekBuf(pos, ahead);
@@ -1929,6 +2021,8 @@
     if (seekDebounce) { clearTimeout(seekDebounce); seekDebounce = null; }
     if (repeatTimer) { clearTimeout(repeatTimer); repeatTimer = null; }
     repeatAt = 0;
+    endCoastFrom = 0;
+    endCoastPos = 0;
     updateRepeatButton();
     playing = null;
     paused = false;
@@ -1955,7 +2049,6 @@
     stagePrerollReady = false;
     updateStageLoader('');
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
-    clock0 = 0;
     bufEnd = 0;
     if ($('btnPause')) $('btnPause').textContent = '일시정지';
     if (!keepBox) {
@@ -2008,6 +2101,7 @@
     stop(true);
     playing = src;
     startAt = seek || 0;
+    lastPlaybackPos = startAt;
     bufEnd = startAt;
     showSeekBuf(startAt, 0);
     if (keepPaused) {
@@ -2150,15 +2244,6 @@
     return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&format=' + encodeURIComponent(streamFormat) + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : ''));
   }
 
-  function startHttpAudio(src) {
-    if (!na) return;
-    var q = '&quality=' + quality + '&start=' + encodeURIComponent(String(startAt));
-    na.preload = 'none';
-    na.src = tv.url('/api/audio?url=' + encodeURIComponent(src) + q + '&_=' + Date.now());
-    na.load();
-    (function tryPlay() { if (na) na.play().catch(function () { setTimeout(tryPlay, 120); }); })();
-  }
-
   var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
   function isAudioLive() {
@@ -2246,7 +2331,9 @@
   }
 
   function startPipes(src) {
-    useHttpAudio = false;
+    // Audio and video must come from the same MPEG-TS timeline.  A separate
+    // HTML audio request races the canvas decoder at startup and drifts after
+    // a seek or reconnect, especially on the in-car browser.
     videoStartWall = 0;
     driftSince = 0;
     driftAlerted = false;
@@ -2337,7 +2424,7 @@
       if (!playing || paused) return;
       monitorOutputClocks();
       requestSoundSync();
-    }, 2000);
+    }, SYNC_INTERVAL_MS);
 
     setStatus(paused ? '일시정지 · 미리 받는 중' : '불러오는 중');
   }
@@ -2364,8 +2451,11 @@
       return Math.max(0, this.startTime - this.context.currentTime);
     };
     WA.prototype.speakerTime = function () {
-      if (this.mediaOrigin == null || !this.context) return 0;
-      return Math.max(0, this.context.currentTime - this.mediaOrigin);
+      if (!(this._schedEndMedia > 0) || this._schedEndCtx == null || !this.context) return 0;
+      var ahead = this._schedEndCtx - this.context.currentTime;
+      if (ahead < 0) ahead = 0;
+      var heard = this._schedEndMedia - ahead;
+      return heard > 0 && isFinite(heard) ? heard : 0;
     };
     WA.prototype.play = function (rate, left, right) {
       if (prerolling) {
@@ -2423,6 +2513,10 @@
       try { src.start(when); } catch (e3) { try { src.start(now); } catch (e4) {} }
       this.startTime += dur;
       audioMediaCursor += dur;
+      // Anchors describe audio that has been started on the device, not
+      // audio still sitting in the preroll queue.
+      this._schedEndCtx = this.startTime;
+      this._schedEndMedia = audioMediaCursor;
       this.enqueuedTime = Math.max(0, this.startTime - ctx.currentTime);
       if (!this._srcs) this._srcs = [];
       this._srcs.push(src);
@@ -2435,6 +2529,26 @@
     var s = 0, i;
     for (i = 0; i < p.length; i++) s += p[i].left.length / p[i].rate;
     return s;
+  }
+
+  function trimPendingAudio(pending, seconds) {
+    var left = Math.max(0, Number(seconds) || 0);
+    while (pending.length && left > 0.0005) {
+      var part = pending[0];
+      var duration = part.left.length / part.rate;
+      if (duration <= left + 0.0005) {
+        pending.shift();
+        left -= duration;
+        continue;
+      }
+      var samples = Math.min(part.left.length, Math.floor(left * part.rate));
+      if (samples > 0) {
+        part.left = part.left.subarray(samples);
+        part.right = part.right.subarray(samples);
+      }
+      left = 0;
+    }
+    return pending;
   }
 
   function failPreroll(msg) {
@@ -2458,6 +2572,7 @@
     if (prerollTimer) { clearTimeout(prerollTimer); prerollTimer = null; }
     var pend = out._pending || [];
     out._pending = [];
+    var fromRebuffer = rebuffering;
     prerolling = false;
     stagePrerollReady = true;
     updateStageLoader('');
@@ -2474,10 +2589,38 @@
       out._pending = pend;
       return;
     }
+    // MPEG-TS can begin a seek on the next video keyframe while decoded audio
+    // still starts at timestamp zero. Drop that unavailable audio lead so the
+    // first audible sample belongs to the frame currently on the canvas.
+    // A rebuffer continues the same timeline; trimming it would discard the
+    // audio just buffered and jump the clock back to the video decoder head.
+    if (!fromRebuffer && player && player.video && isFinite(player.video.currentTime)) {
+      var firstVideoTime = Math.max(0, player.video.currentTime);
+      if (firstVideoTime > 0.04) {
+        trimPendingAudio(pend, firstVideoTime);
+        audioMediaCursor = firstVideoTime;
+      }
+    }
+    // Leave one paint interval for the decoded first frame before the first
+    // WebAudio buffer is scheduled. This makes the canvas visible when sound
+    // begins without introducing perceptible A/V offset.
+    try {
+      if (out.context) out.startTime = Math.max(out.startTime || 0, out.context.currentTime + 0.035);
+    } catch (eStart) {}
     var i;
     for (i = 0; i < pend.length; i++) {
       out.play(pend[i].rate, pend[i].left, pend[i].right);
     }
+    debugPlayback('playback-start', {
+      start: startAt,
+      videoTime: player && player.video ? player.video.currentTime : 0,
+      queuedAudio: queuedAudio(),
+      audioAhead: audioAheadSec(),
+      videoAhead: videoAheadSec(),
+      prerollMs: prerollAt ? Date.now() - prerollAt : 0,
+      quality: quality,
+      bitrateMode: vbrLow ? 'low' : 'normal'
+    });
   }
 
   function beginRebuffer() {
@@ -2521,10 +2664,24 @@
     var packed = packedAhead();
     var queued = queuedAudio();
     var decodeStalled = lastVideoDecodeAt > 0 && Date.now() - lastVideoDecodeAt > 1800;
-    var audioStarved = audioAhead < 0.45 && queued < 0.35 && packed < 0.35;
-    var decodeStarved = decodeStalled && audioAhead < 1.0 && packed < 1.0 && queued < 0.6;
+    var heard = playingSoundTime({ fallback: false });
+    var videoTime = player && player.video && isFinite(player.video.currentTime) ? player.video.currentTime : 0;
+    // A short MP2 packet gap is normal on the car browser. Do not flash the
+    // loading state for it; only rebuffer after a sustained empty audio clock.
+    var audioEmpty = audioAhead < 0.08 && queued < 0.08 && packed < 0.08;
+    if (audioEmpty) {
+      if (!audioStarvedSince) audioStarvedSince = Date.now();
+    } else {
+      audioStarvedSince = 0;
+    }
+    var audioStarved = audioEmpty && Date.now() - audioStarvedSince > 1200;
+    var decodeStarved = decodeStalled && audioEmpty && Date.now() - audioStarvedSince > 700;
+    // Sound is the master clock. If the canvas has no near-term frame while
+    // the audible clock is moving ahead, enter one coordinated rebuffer
+    // before the mismatch becomes visible.
+    var videoCannotFollow = heard > videoTime + 0.22 && videoAheadSec() < 0.35;
     if (audioAhead > 1.0 || packed > 1.5 || queued > 0.8) return false;
-    return audioStarved || decodeStarved;
+    return audioStarved || decodeStarved || videoCannotFollow;
   }
 
   function primeVideoDecodeIfNeeded(playerObj) {
@@ -2546,7 +2703,7 @@
     JSMpeg.Player.prototype.updateForStreaming = function () {
       applyStreamHold();
       if (ended) return;
-      if (streamEnded && supplyDrained()) {
+      if (readyToFinish()) {
         finishPlayback();
         return;
       }
@@ -2566,14 +2723,14 @@
         restartDeadVideoStream('restart-no-video-first-frame');
         return;
       }
-      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000) {
+      if (lastVideoDecodeAt && Date.now() - lastVideoDecodeAt > 4000 && !(streamEnded && audioPendingSec() < 0.25)) {
         restartDeadVideoStream('restart-video-stalled', {
           stalledMs: Date.now() - lastVideoDecodeAt
         });
         return;
       }
       if (prerolling) {
-        var need = isLive ? 0.8 : PREROLL_SEC;
+        var need = isLive ? 0.8 : (startAt > 2 || rebuffering ? SEEK_AUDIO_PREROLL_SEC : PREROLL_SEC);
         var n = 0;
         while (this.audio && pendingAudioSec(this.audioOut) < need && n < 24) {
           n++;
@@ -2611,9 +2768,8 @@
             failPreroll();
             return;
           }
-          if (rebuffering && waited > 8000 && nearEnd() && supplyDrained()) {
-            finishPlayback();
-            return;
+          if (rebuffering && waited > 8000 && audioPendingSec() < 0.25 && nearEnd()) {
+            markStreamEnded();
           }
           if (rebuffering && waited > 8000 && !readyV) {
             restartDeadVideoStream('restart-rebuffer-video-stalled', {
@@ -2650,7 +2806,6 @@
   function launchPlayer(wsUrl) {
     var gen = ++streamGen;
     if (player) { try { player.destroy(); } catch (e) {} player = null; }
-    clock0 = 0;
     fpsCount = 0;
     lastFps = Date.now();
     videoStartWall = 0;
@@ -2665,9 +2820,12 @@
     lastOutputWatchAt = 0;
     outputGapSince = 0;
     videoCatching = false;
+    audioStarvedSince = 0;
     lastSocketRestart = 0;
     seekSettleUntil = 0;
     lastHeard = 0;
+    endCoastFrom = 0;
+    endCoastPos = 0;
     resumeHeard = 0;
     resumePending = false;
     streamHeld = false;
@@ -2726,8 +2884,14 @@
           lastVideoDecodeAt = decodeNow;
           if (!videoStartWall) {
             videoStartWall = Date.now();
-            clock0 = Date.now();
             fitStage();
+            debugPlayback('first-video-frame', {
+              start: startAt,
+              videoTime: player && player.video ? player.video.currentTime : 0,
+              audioTime: playingSoundTime({ fallback: false }),
+              quality: quality,
+              bitrateMode: vbrLow ? 'low' : 'normal'
+            });
           }
           fpsCount++;
             stageFrameReady = true;
@@ -2747,6 +2911,9 @@
         player.audioOut.startTime = 0;
         player.audioOut.mediaOrigin = null;
         player.audioOut._srcs = [];
+        player.audioOut._schedEndCtx = 0;
+        player.audioOut._schedEndMedia = 0;
+        player.audioOut._pending = [];
         player.audioOut.enabled = true;
         player.audioOut.unlocked = true;
       }
@@ -2783,6 +2950,9 @@
       if (ev && typeof ev.data === 'string') {
         try {
           var msg = JSON.parse(ev.data);
+          if (msg && msg.type === 'stream-debug' && playbackDebug) {
+            debugPlayback('stream-source', msg);
+          }
           if (msg && msg.type === 'seek-debug' && playbackDebug) {
             debugPlayback('seek-stream-closed', msg);
           }
@@ -2794,7 +2964,10 @@
             }, 40);
             return;
           }
-          if (msg && msg.type === 'ended') markStreamEnded();
+          if (msg && msg.type === 'ended') {
+            flushDemuxTail();
+            markStreamEnded();
+          }
           if (msg && (msg.type === 'error' || msg.type === 'status') && msg.message) {
             var sm = String(msg.message).replace(/\s+/g, ' ').trim();
             if (/ERROR:|Forbidden|403|unable to|format is not available|페이지를 새로고침|봇이 아님|지정한 위치의 영상/i.test(sm)) {
@@ -2854,6 +3027,7 @@
         if (Date.now() - lastSocketRestart >= 12000) {
           lastSocketRestart = Date.now();
           var resumeSec = Math.max(0, currentPos() - 0.5);
+          if (resumeSec < 5 && lastPlaybackPos >= 5) resumeSec = Math.max(0, lastPlaybackPos - 0.5);
           setStatus('네트워크가 끊겨 재연결하는 중...');
           setTimeout(function () {
             if (gen !== streamGen || !playing || paused || ended || streamEnded) return;
@@ -2955,11 +3129,6 @@
     if (player.audioOut) {
       player.audioOut.enabled = true;
       player.audioOut.unlocked = true;
-      var resumeVideoTime = player.video && isFinite(player.video.currentTime) ? player.video.currentTime : -1;
-      if (resumeVideoTime >= 0) {
-        audioMediaCursor = Math.max(0, resumeVideoTime);
-        resumeHeard = audioMediaCursor;
-      }
       if (prerolling) flushPrerollAudio(player.audioOut);
       var ctx = player.audioOut.context;
       var pending = player.audioOut._pending || [];
@@ -2970,17 +3139,14 @@
         decodedTime: player.audio && isFinite(player.audio.decodedTime) ? player.audio.decodedTime : -1,
         pendingAudioSec: pendingAudioSec(player.audioOut),
         contextTime: ctx ? ctx.currentTime : -1,
-        liveSoundTime: live
+        liveSoundTime: live,
+        speakerHeard: speakerHeard()
       });
-      if (!(live > 0)) {
-        try {
-          if (!pending.length) {
-            var decT = player.audio && player.audio.decodedTime;
-            if (decT > 0) audioMediaCursor = decT;
-            else if (pauseHeard > 0) audioMediaCursor = pauseHeard;
-          }
-          if (ctx) player.audioOut.startTime = ctx.currentTime;
-        } catch (e0) {}
+      // Keep the sample cursor. Pointing it at the video decoder or the
+      // decoded-ahead head skips or repeats audible time after a short pause.
+      if (ctx) {
+        var endCtx = player.audioOut._schedEndCtx || 0;
+        if (!(endCtx > ctx.currentTime + 0.02)) player.audioOut.startTime = ctx.currentTime + 0.02;
       }
       if (pending.length && ctx) player.audioOut.startTime = ctx.currentTime + 0.02;
       player.audioOut._pending = [];
@@ -3042,7 +3208,9 @@
       $('btnPause').textContent = '일시정지';
       flashTap('❚❚');
       applyChrome();
-      if (pauseWall && Date.now() - pauseWall > 500 && playing) {
+      // A healthy socket can resume in place. Rebuilding the stream on a
+      // short pause throws away the buffer and lands the clock on a new seek.
+      if (pauseWall && Date.now() - pauseWall > 60000 && playing) {
         var resumeSec = pausePos >= 0 ? pausePos : currentPos();
         pauseWall = 0;
         pausePos = -1;
@@ -3444,7 +3612,7 @@
     vbrLow = el.getAttribute('data-vbr') === 'low';
   });
   bindToggleBtns('.fmtbtn', 'fmtbtn', function (el) {
-    streamFormat = el.getAttribute('data-format') || '243+140';
+    streamFormat = el.getAttribute('data-format') || '134+140';
   });
   bindToggleBtns('.bbtn', 'bbtn', function (el) {
     var n = parseInt(el.getAttribute('data-buf'), 10);

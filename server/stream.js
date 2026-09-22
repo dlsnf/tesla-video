@@ -61,13 +61,18 @@ function killProc(p) {
   try { if (p.pid) killTree(p); } catch (e1) {}
 }
 
-function startYoutubePipe(info, start, format) {
+function startYoutubePipe(info, start, format, timestampOffset) {
   var formats = {
     '134+140': '134+140/135+140/160+139/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
     '243+140': '243+140/134+140/160+139/bestvideo[height<=360][vcodec^=vp9]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
   };
+  // The fallback is decoded by ffmpeg before reaching the car, so it can use
+  // the best source at the requested size instead of being tied to a 360p
+  // H.264 itag.
+  var requestedHeight = Number(info && info.quality) >= 720 ? 720 : (Number(info && info.quality) >= 480 ? 480 : 360);
+  var requestedFormat = 'bestvideo[height<=' + requestedHeight + ']+bestaudio/bv*[height<=' + requestedHeight + ']+ba/best[height<=' + requestedHeight + ']';
   const extra = [
-    '-f', formats[format] || formats['134+140'],
+    '-f', requestedHeight > 360 ? requestedFormat : (formats[format] || formats['134+140']),
     '--merge-output-format', 'mkv',
     '--no-part',
     '--no-progress',
@@ -108,7 +113,7 @@ function startYoutubePipe(info, start, format) {
       '-err_detect', 'ignore_err',
       '-i', 'pipe:0',
     ];
-    Array.prototype.push.apply(ffArgs, encodeTs(info));
+    Array.prototype.push.apply(ffArgs, encodeTs(info, timestampOffset));
     ffmpeg = spawn(config.FFMPEG, ffArgs, { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     swallowErr(ffmpeg.stdin);
     swallowErr(ffmpeg.stdout);
@@ -217,7 +222,9 @@ function netInput(url, coarse, isLive, headers, opts) {
     a.unshift('-reconnect', '1');
   }
   if (!isLive && coarse > 0) a.push('-ss', String(coarse));
-  if (!opts.noRate) a.push('-readrate', isLive ? '1.0' : '1.1');
+  // VOD is deliberately produced ahead of real time so the browser has a
+  // meaningful reserve before a brief network or decoder hiccup.
+  if (!opts.noRate) a.push('-readrate', isLive ? '1.0' : '1.35');
   a.push('-i', url);
   return a;
 }
@@ -233,7 +240,7 @@ function pickDumpFormat(dump, ids) {
   return null;
 }
 
-function startYoutubeSeek(info, start) {
+function startYoutubeSeek(info, start, opts) {
   if (!info || !info.videoUrl || !info.audioUrl) return null;
   var v = { url: info.videoUrl, http_headers: info.videoHeaders };
   var a = { url: info.audioUrl, http_headers: info.audioHeaders };
@@ -246,11 +253,14 @@ function startYoutubeSeek(info, start) {
   Array.prototype.push.apply(args, netInput(a.url, 0, false, a.http_headers, { noRate: true }));
   args.push('-map', '0:v:0', '-map', '1:a:0');
   if (fine > 0) args.push('-ss', String(fine));
-  Array.prototype.push.apply(args, encodeTs(info));
+  Array.prototype.push.apply(args, encodeTs(info, opts && opts.timestampOffset));
   return spawnFfmpeg(args);
 }
 
-function encodeTs(info) {
+function encodeTs(info, timestampOffset) {
+  const offset = Number(timestampOffset) > 0 ? Number(timestampOffset) : 0;
+  const videoPts = offset ? 'setpts=PTS-STARTPTS+' + offset + '/TB' : 'setpts=PTS-STARTPTS';
+  const audioPts = offset ? 'asetpts=PTS-STARTPTS+' + offset + '/TB' : 'asetpts=PTS-STARTPTS';
   return [
     '-fflags', '+genpts',
     '-avoid_negative_ts', 'make_zero',
@@ -259,8 +269,8 @@ function encodeTs(info) {
     '-q:v', '5',
     '-b:v', info.bitrate || '1000k',
     '-bf', '0',
-    '-vf', 'fps=' + (info.fps === 30 ? 30 : 24) + ',scale=' + (info.scale || '640:360') + ':flags=fast_bilinear,setsar=1,setpts=PTS-STARTPTS',
-    '-af', 'aresample=44100:first_pts=0,asetpts=PTS-STARTPTS',
+    '-vf', 'fps=' + (info.fps === 30 ? 30 : 24) + ',scale=' + (info.scale || '640:360') + ':flags=fast_bilinear,setsar=1,' + videoPts,
+    '-af', 'aresample=44100:first_pts=0,' + audioPts,
     '-c:a', 'mp2',
     '-b:a', '192k',
     '-ar', '44100',
@@ -306,7 +316,18 @@ function startTestAudio() {
 function startVideo(info, start, opts) {
   opts = opts || {};
   if (info.type === 'test') return startTestVideo(info);
-  if (info.type === 'youtube') return startYoutubePipe(info, start, opts.format);
+  // The direct URL path is fast, but some CDN ranges legitimately return an
+  // empty successful response after a seek. The legacy yt-dlp section reader
+  // is slower to start but reliable for that fallback.
+  if (info.type === 'youtube' && opts.legacySeek) {
+    return startYoutubePipe(info, start, opts.format, opts.timestampOffset);
+  }
+  // Seeking remote YouTube media through the normal rate-limited relay can
+  // leave ffmpeg waiting at a non-keyframe. Use independent fast inputs for
+  // a seek; the output still starts at the requested, synchronized timestamp.
+  if (info.type === 'youtube' && !info.isLive && Number(start) > 2 && info.videoUrl && info.audioUrl) {
+    return startYoutubeSeek(info, start, opts);
+  }
   const sk = seekParts(start, info.isLive);
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err'];
   if (info.audioUrl && info.audioUrl !== info.videoUrl) {
@@ -319,21 +340,28 @@ function startVideo(info, start, opts) {
     if (sk.fine > 0) args.push('-ss', String(sk.fine));
     args.push('-map', '0:v:0', '-map', '0:a:0?');
   }
-  Array.prototype.push.apply(args, encodeTs(info));
+  Array.prototype.push.apply(args, encodeTs(info, opts.timestampOffset));
   return spawnFfmpeg(args);
 }
 
-function startAudio(info, start) {
+function startAudio(info, start, fast) {
   if (info.type === 'test') return startTestAudio();
-  const args = ffmpegInputPrefix(start, info.isLive).concat([
+  const inputArgs = info.type === 'file'
+    ? ['-hide_banner', '-loglevel', 'warning'].concat(Number(start) > 0 ? ['-ss', String(start)] : [], ['-i', info.audioUrl])
+    : fast
+    ? ['-hide_banner', '-loglevel', 'warning']
+    : ffmpegInputPrefix(start, info.isLive);
+  const sourceArgs = info.type === 'file' ? [] : [
     '-user_agent', YT_UA,
     '-referer', 'https://www.youtube.com/',
     '-i', info.audioUrl,
+  ];
+  const args = inputArgs.concat(sourceArgs, [
     '-vn',
     '-fflags', 'nobuffer',
     '-flags', 'low_delay',
-    '-analyzeduration', '0',
-    '-probesize', '32',
+    '-analyzeduration', fast ? '2M' : '0',
+    '-probesize', fast ? '512k' : '32',
     '-c:a', 'libmp3lame',
     '-b:a', '160k',
     '-ar', '44100',
@@ -442,8 +470,10 @@ function attachWsStream(ws, input, quality, start, extra) {
     var errBuf = '';
     var sourceRejectedSeen = false;
     var sourceRefreshTimer = null;
-    var SEND_CAP = 256 * 1024;
-    var PENDING_CAP = 256 * 1024;
+    // Keep several seconds of encoded media available before applying socket
+    // backpressure. This lets the browser refill audio after a decode hiccup.
+    var SEND_CAP = 768 * 1024;
+    var PENDING_CAP = 768 * 1024;
     function pauseOut() {
       try { if (ffmpeg && ffmpeg.stdout && ffmpeg.stdout.pause) ffmpeg.stdout.pause(); } catch (e) {}
     }
@@ -465,7 +495,7 @@ function attachWsStream(ws, input, quality, start, extra) {
         resumeOut();
         return;
       }
-      var take = pendingBytes > 32 * 1024 ? 32 * 1024 : pendingBytes;
+      var take = pendingBytes > 64 * 1024 ? 64 * 1024 : pendingBytes;
       var out;
       if (take === pendingBytes) {
         out = Buffer.concat(pending, pendingBytes);
@@ -493,16 +523,29 @@ function attachWsStream(ws, input, quality, start, extra) {
       if (pendingBytes >= PENDING_CAP || ws.bufferedAmount > SEND_CAP) pauseOut();
       else resumeOut();
     };
-    flushTimer = setInterval(flushWs, 70);
+    flushTimer = setInterval(flushWs, 40);
     slot.kill = function () { if (flushTimer) clearInterval(flushTimer); killProc(ffmpeg); };
 
     function bindMpeg(cur) {
       if (!cur) return;
       var lastEncodedSec = 0;
+      var streamDebugSent = false;
       swallowErr(cur.stdout);
       swallowErr(cur.stderr);
       if (cur.stdin) swallowErr(cur.stdin);
       cur.stdout.on('data', function (chunk) {
+        if (!streamDebugSent) {
+          streamDebugSent = true;
+          sendJson(ws, {
+            type: 'stream-debug',
+            start: parseStart(start),
+            requestedQuality: Number(quality) || 480,
+            sourceHeight: info.sourceHeight || 0,
+            output: info.scale || '',
+            bitrate: info.bitrate || '',
+            path: legacySeek ? 'yt-dlp-seek-fallback' : (parseStart(start) > 2 ? 'direct-seek' : 'direct-start')
+          });
+        }
         mpegSent += chunk.length;
         pending.push(chunk);
         pendingBytes += chunk.length;
@@ -538,7 +581,7 @@ function attachWsStream(ws, input, quality, start, extra) {
                   if (closed || !cur._buddy) return;
                   sendStatus(ws, '다시 연결하는 중...');
                   try { killTree(cur._buddy); } catch (eRefresh) {}
-                }, 250);
+                }, 1200);
               }
             }
             errBuf += ' ' + s;
@@ -549,7 +592,9 @@ function attachWsStream(ws, input, quality, start, extra) {
       }
       function closeAfterDrain(message) {
         clientHold = false;
-        var deadline = Date.now() + 3000;
+        // The last seconds are often still in the socket buffer. Closing on
+        // a short deadline drops them and the repeat countdown starts early.
+        var deadline = Date.now() + 15000;
         function drain() {
           if (closed) return;
           flushWs();
@@ -570,10 +615,20 @@ function attachWsStream(ws, input, quality, start, extra) {
         }
         var sourceRejected = sourceRejectedSeen || /403|forbidden|http error/i.test(errBuf);
         var streamFailed = code != null && code !== 0;
+        // An empty, clean close after a VOD seek is a known CDN range edge
+        // case. Do not retry the same request and then mark playback ended;
+        // switch the client to the yt-dlp section-reader fallback instead.
+        if (!legacySeek && parseStart(start) > 2 && mpegSent < 8000 && !sourceRejected) {
+          sendStatus(ws, '시크 구간을 다시 준비하는 중...');
+          closeAfterDrain({ type: 'seek-retry', mode: 'legacy' });
+          return;
+        }
         if ((mpegSent < 8000 || sourceRejected || streamFailed) && encodeAttempt < 2) {
           encodeAttempt += 1;
           try { media.invalidateSource(info && info.id); } catch (eInv) {}
           sendStatus(ws, parseStart(start) > 2 ? '지정한 위치부터 다시 받는 중...' : '다시 연결하는 중...');
+          var resumeOffset = Math.max(0, lastEncodedSec - 0.5);
+          var resumeStart = parseStart(start) + resumeOffset;
           media.resolveSource(input, quality).then(function (fresh) {
             if (closed) return;
             info = fresh;
@@ -583,9 +638,7 @@ function attachWsStream(ws, input, quality, start, extra) {
             errBuf = '';
             sourceRejectedSeen = false;
             if (sourceRefreshTimer) { clearTimeout(sourceRefreshTimer); sourceRefreshTimer = null; }
-            pending = [];
-            pendingBytes = 0;
-            ffmpeg = startVideo(info, start, { format: extra && extra.format, legacySeek: legacySeek });
+            ffmpeg = startVideo(info, resumeStart, { format: extra && extra.format, legacySeek: legacySeek, timestampOffset: resumeOffset });
             slot.kill = function () { if (flushTimer) clearInterval(flushTimer); killProc(ffmpeg); };
             bindMpeg(ffmpeg);
           }).catch(function (e) {
@@ -660,6 +713,9 @@ function attachAudioStream(req, res, input, quality, start) {
   }
 
   let ffmpeg = null;
+  let audioInfo = null;
+  let audioRetry = 0;
+  let audioStartedAt = Date.now();
   let closed = false;
   const slot = { kind: 'audio', kill: function () { if (ffmpeg) killTree(ffmpeg); } };
   active.add(slot);
@@ -681,13 +737,29 @@ function attachAudioStream(req, res, input, quality, start) {
     'Access-Control-Allow-Origin': '*',
   });
 
-  media.resolveSource(input, quality).then(function (info) {
+  function attachAudio(info, seek) {
     if (closed) return;
-    ffmpeg = startAudio(info, start);
+    audioInfo = info;
+    audioStartedAt = Date.now();
+    ffmpeg = startAudio(info, seek);
     slot.kill = function () { if (ffmpeg) killTree(ffmpeg); };
-    ffmpeg.stdout.pipe(res);
+    ffmpeg.stdout.pipe(res, { end: false });
     ffmpeg.stderr.on('data', function () {});
-    ffmpeg.on('close', function () {
+    ffmpeg.on('close', function (code) {
+      if (closed) return;
+      ffmpeg = null;
+      if (code && audioRetry < 2 && audioInfo && audioInfo.id) {
+        audioRetry++;
+        const elapsed = Math.max(0, (Date.now() - audioStartedAt) / 1000);
+        media.invalidateSource(audioInfo.id);
+        media.resolveSource(input, quality).then(function (fresh) {
+          attachAudio(fresh, (Number(seek) || 0) + elapsed - 0.25);
+        }).catch(function () {
+          try { res.end(); } catch (e0) {}
+          cleanup();
+        });
+        return;
+      }
       try { res.end(); } catch (e) {}
       cleanup();
     });
@@ -695,6 +767,10 @@ function attachAudioStream(req, res, input, quality, start) {
       try { res.end(); } catch (e) {}
       cleanup();
     });
+  }
+
+  media.resolveSource(input, quality).then(function (info) {
+    attachAudio(info, start);
   }).catch(function () {
     try { res.status(500).end(); } catch (e) {}
     cleanup();
