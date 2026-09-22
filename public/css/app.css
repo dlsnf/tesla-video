@@ -123,6 +123,16 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .comment-sort.on { background: #303030; color: #fff; font-weight: 700; }
 .comments-close { min-height: 34px; padding: 0 12px; border: 0; border-radius: 16px; background: var(--card-2); color: var(--text); cursor: pointer; }
 .comments-list { max-height: min(52vh, 480px); overflow-y: auto; overscroll-behavior: contain; }
+.comments-loading-card { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 28px 14px 18px; color: var(--muted); font-size: .8rem; text-align: center; }
+.comments-loading-card strong { color: var(--text); font-size: .9rem; }
+.comments-loading-spinner { width: 26px; height: 26px; border: 3px solid #555; border-top-color: #fff; border-radius: 50%; animation: comment-spin .8s linear infinite; }
+.comment-skeleton { display: flex; gap: 12px; padding: 14px; border-bottom: 1px solid #292929; opacity: .72; }
+.comment-skeleton i { width: 40px; height: 40px; flex: 0 0 40px; border-radius: 50%; background: #333; }
+.comment-skeleton div { flex: 1; padding-top: 4px; }
+.comment-skeleton b, .comment-skeleton em { display: block; height: 10px; margin-bottom: 9px; border-radius: 5px; background: #333; }
+.comment-skeleton b { width: 32%; }
+.comment-skeleton em { width: 88%; }
+.comment-skeleton em:last-child { width: 61%; }
 .comment-item { display: flex; gap: 12px; padding: 16px 14px; border-bottom: 1px solid #292929; }
 .comment-avatar { width: 40px; height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 50%; background: #3b3b3b; color: #fff; font-size: .95rem; font-weight: 700; text-transform: uppercase; }
 .comment-avatar img { width: 100%; height: 100%; object-fit: cover; }

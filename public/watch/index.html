@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=139">
+<link rel="stylesheet" href="../css/app.css?v=140">
 </head>
 <body class="watch-loading">
 <div id="loadingCurtain" class="loading-curtain on" aria-hidden="true"></div>
@@ -81,7 +81,7 @@
           <span class="bar-seg">
             <button class="ctrl qbtn on" data-q="360" type="button">360</button>
             <button class="ctrl qbtn" data-q="480" type="button">480</button>
-            <button class="ctrl qbtn" data-q="720" type="button">선명</button>
+            <button class="ctrl qbtn" data-q="720" type="button">720</button>
           </span>
         </div>
         <div class="bar-group">
@@ -109,8 +109,7 @@
         <div class="bar-group">
           <span class="bar-lab">소스 테스트</span>
           <span class="bar-seg">
-            <button class="ctrl fmtbtn" data-format="134+140" type="button">H264+AAC</button>
-            <button class="ctrl fmtbtn on" data-format="243+140" type="button">VP9+AAC</button>
+            <button class="ctrl fmtbtn on" data-format="134+140" type="button">H264+AAC</button>
           </span>
         </div>
       </div>
@@ -138,7 +137,9 @@
         <strong>댓글</strong>
         <div class="comments-head-actions">
           <button class="comment-sort on" data-comment-sort="top" aria-pressed="true" type="button">인기순</button>
+          <button class="comment-sort" data-comment-sort="top-asc" aria-pressed="false" type="button">비인기순</button>
           <button class="comment-sort" data-comment-sort="new" aria-pressed="false" type="button">최신순</button>
+          <button class="comment-sort" data-comment-sort="new-asc" aria-pressed="false" type="button">과거순</button>
           <button class="comments-close" id="commentsClose" type="button" aria-label="댓글 닫기">닫기</button>
         </div>
       </div>
@@ -202,6 +203,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=133"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=163"></script>
+  <script src="../js/player.js?v=194"></script>
 </body>
 </html>

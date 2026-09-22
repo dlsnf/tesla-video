@@ -326,6 +326,9 @@ function attachAudioStream(req, res, input, quality, start) {
   }
 
   let ffmpeg = null;
+  let audioInfo = null;
+  let audioRetry = 0;
+  let audioStartedAt = Date.now();
   let closed = false;
   const slot = { kind: 'audio', kill: function () { if (ffmpeg) killTree(ffmpeg); } };
   active.add(slot);
@@ -347,13 +350,29 @@ function attachAudioStream(req, res, input, quality, start) {
     'Access-Control-Allow-Origin': '*',
   });
 
-  media.resolveSource(input, quality).then(function (info) {
+  function attachAudio(info, seek) {
     if (closed) return;
-    ffmpeg = startAudio(info, start);
+    audioInfo = info;
+    audioStartedAt = Date.now();
+    ffmpeg = startAudio(info, seek);
     slot.kill = function () { if (ffmpeg) killTree(ffmpeg); };
-    ffmpeg.stdout.pipe(res);
+    ffmpeg.stdout.pipe(res, { end: false });
     ffmpeg.stderr.on('data', function () {});
-    ffmpeg.on('close', function () {
+    ffmpeg.on('close', function (code) {
+      if (closed) return;
+      ffmpeg = null;
+      if (code && audioRetry < 2 && audioInfo && audioInfo.id) {
+        audioRetry++;
+        const elapsed = Math.max(0, (Date.now() - audioStartedAt) / 1000);
+        media.invalidateSource(audioInfo.id);
+        media.resolveSource(input, quality).then(function (fresh) {
+          attachAudio(fresh, (Number(seek) || 0) + elapsed - 0.25);
+        }).catch(function () {
+          try { res.end(); } catch (e0) {}
+          cleanup();
+        });
+        return;
+      }
       try { res.end(); } catch (e) {}
       cleanup();
     });
@@ -361,6 +380,10 @@ function attachAudioStream(req, res, input, quality, start) {
       try { res.end(); } catch (e) {}
       cleanup();
     });
+  }
+
+  media.resolveSource(input, quality).then(function (info) {
+    attachAudio(info, start);
   }).catch(function () {
     try { res.status(500).end(); } catch (e) {}
     cleanup();

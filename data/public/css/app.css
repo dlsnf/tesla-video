@@ -171,6 +171,10 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   transition: width 0.35s linear;
 }
 .player-box.paused .seek-buf { background: #c8c8c8; }
+.audio-buffer-wrap { display: flex; align-items: center; gap: 8px; height: 16px; margin: 0 1px 4px; color: #8e8e8e; font-size: 10px; }
+.audio-buffer-label { width: 48px; flex: 0 0 48px; }
+.audio-buffer-track { position: relative; flex: 1; height: 4px; border-radius: 2px; background: #2f2f2f; overflow: hidden; }
+.audio-buffer-fill { height: 100%; width: 0; background: #4aa3df; transition: width .15s linear; }
 .seek-play {
   position: absolute; left: 0; top: 0; height: 100%; width: 0;
   background: #ff0000;

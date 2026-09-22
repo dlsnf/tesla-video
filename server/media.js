@@ -161,6 +161,7 @@ function classify(input) {
 
 function heightForQuality(quality) {
   const q = parseInt(quality, 10) || 360;
+  if (q >= 720) return 720;
   if (q >= 480) return 480;
   return 360;
 }
@@ -190,8 +191,15 @@ function stripBrokenFormats(data) {
   if (Array.isArray(data.formats)) {
     data.formats = data.formats.filter(function (f) { return f && !isBrokenItag(f); });
   }
-  delete data.requested_formats;
-  delete data.requested_downloads;
+  // Keep yt-dlp's selected format list until pickDumpUrls() reads it. Removing
+  // it makes the first playback choose the first arbitrary entry in `formats`
+  // (often a low-resolution adaptive stream) instead of the requested 480p.
+  if (Array.isArray(data.requested_formats)) {
+    data.requested_formats = data.requested_formats.filter(function (f) { return f && !isBrokenItag(f); });
+  }
+  if (Array.isArray(data.requested_downloads)) {
+    data.requested_downloads = data.requested_downloads.filter(function (f) { return f && !isBrokenItag(f); });
+  }
   delete data.format_id;
   delete data.url;
   return data;
@@ -225,12 +233,12 @@ function pickDumpUrls(data) {
 function formatForQuality(quality) {
   const h = heightForQuality(quality);
   return [
-    '134+140',
-    '135+140',
-    '160+139',
     'bestvideo[height<=' + h + ']+bestaudio',
     'bv*[height<=' + h + '][format_id!=18]+ba',
     'best[format_id!=18]',
+    '134+140',
+    '135+140',
+    '160+139',
   ].join('/');
 }
 
@@ -254,7 +262,7 @@ function even(n) {
 }
 
 function sizeForQuality(quality, srcW, srcH) {
-  const hMap = { 360: 360, 480: 480, 720: 480, 1080: 480 };
+  const hMap = { 360: 360, 480: 480, 720: 720, 1080: 720 };
   let h = hMap[parseInt(quality, 10)] || heightForQuality(quality);
   let w;
   const sw = parseInt(srcW, 10) || 0;
@@ -279,12 +287,12 @@ function bitrateForQuality(quality, low) {
   const q = parseInt(quality, 10) || 360;
   if (low) {
     if (q <= 360) return '400k';
-    if (q <= 480) return '700k';
-    return '1000k';
+    if (q <= 480) return '1100k';
+    return '1800k';
   }
   if (q <= 360) return '600k';
-  if (q <= 480) return '1000k';
-  return '1500k';
+  if (q <= 480) return '1800k';
+  return '3000k';
 }
 
 function cacheGet(map, key, ttl) {
@@ -329,7 +337,10 @@ async function resolveSource(input, quality) {
   const q = parseInt(quality, 10) || 480;
   const key = classified.type + '|' + classified.id + '|' + q;
   const cached = cacheGet(resolveCache, key, RESOLVE_TTL);
-  if (cached) return cached;
+  // Older cache entries were created before the requested source height was
+  // recorded and may pin a new playback to a 360p direct URL. Refresh once.
+  if (cached && cached.sourceHeight != null) return cached;
+  if (cached) resolveCache.delete(key);
 
   const format = formatForQuality(q);
   const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s';
@@ -340,7 +351,7 @@ async function resolveSource(input, quality) {
   for (let i = 0; i < candidateFormats.length; i++) {
     try {
       const result = await ytdlpRun(
-        i === 0 ? ['-J', classified.pageUrl] : ['-f', candidateFormats[i], '-J', classified.pageUrl],
+        ['-f', candidateFormats[i], '-J', classified.pageUrl],
         { timeout: 40000 }
       );
       dumpJson = stripBrokenFormats(parseJsonBlob(result.stdout));
@@ -388,6 +399,7 @@ async function resolveSource(input, quality) {
       videoHeaders: vf.http_headers || d.http_headers || null,
       audioHeaders: af.http_headers || vf.http_headers || d.http_headers || null,
       quality: q,
+      sourceHeight: parseInt(vf.height, 10) || 0,
       width: sized.width,
       height: sized.height,
       aspect: sized.aspect,
@@ -439,6 +451,7 @@ async function resolveSource(input, quality) {
       videoHeaders: null,
       audioHeaders: null,
       quality: q,
+      sourceHeight: parseInt(parts[7], 10) || 0,
       width: sized.width,
       height: sized.height,
       aspect: sized.aspect,
@@ -1328,16 +1341,14 @@ async function youtubeComments(id, limit, offset, sort) {
     const data = parseJsonBlob(result.stdout) || {};
     comments = (Array.isArray(data.comments) ? data.comments : []).map(function (item) {
       if (!item) return null;
-      const rawLikes = item.like_count != null ? item.like_count
-        : (item.likeCount != null ? item.likeCount
-          : (item.likes != null ? item.likes
-            : (item.like_count_text != null ? item.like_count_text
-              : (item.likeCountText != null ? item.likeCountText
-                : (item.vote_count != null ? item.vote_count : item.voteCount)))));
+      const likeCandidates = [item.like_count, item._like_count, item.likeCount,
+        item.likes, item.like_count_text, item.likeCountText, item.vote_count,
+        item.voteCount, item.vote_count_text];
+      const rawLikes = likeCandidates.find(function (value) { return value != null && value !== ''; });
       const likesText = rawLikes && typeof rawLikes === 'object' ? textOf(rawLikes) : rawLikes;
       const likesString = String(likesText == null ? '' : likesText).replace(/,/g, '').trim();
       const likes = likesString ? parseKoViews(likesString) : null;
-      var rawTime = item.timestamp || item.time || item.comment_time || item.published_at;
+      var rawTime = item.timestamp || item._timestamp || item.time || item.comment_time || item.published_at || item.publishedAt;
       var time = parseInt(rawTime, 10) || 0;
       if (time > 100000000000) time = Math.floor(time / 1000);
       if (!time && rawTime) {
@@ -1351,7 +1362,7 @@ async function youtubeComments(id, limit, offset, sort) {
         text: String(item.text || '').slice(0, 2000),
         likes: likes,
         time: time,
-        timeText: String(item.time_text || item.published || item.published_time || item.comment_time_text || '').slice(0, 80),
+        timeText: String(item.time_text || item._time_text || item.published || item.published_time || item.comment_time_text || item.publishedTimeText || '').slice(0, 80),
       };
     }).filter(function (item) { return item && item.text; });
     comments.sort(function (a, b) {
