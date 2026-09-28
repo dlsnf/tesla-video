@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=140">
+<link rel="stylesheet" href="../css/app.css?v=141">
 </head>
 <body class="watch-loading">
 <div id="loadingCurtain" class="loading-curtain on" aria-hidden="true"></div>
@@ -106,6 +106,14 @@
             <button class="ctrl bbtn" data-buf="30" type="button">30초</button>
           </span>
         </div>
+        <div class="bar-group fs-pos">
+          <span class="bar-lab">위치</span>
+          <span class="bar-seg">
+            <button class="ctrl abtn on" data-align="top" type="button">상단</button>
+            <button class="ctrl abtn" data-align="center" type="button">가운데</button>
+            <button class="ctrl abtn" data-align="bottom" type="button">하단</button>
+          </span>
+        </div>
         <div class="bar-group">
           <span class="bar-lab">소스 테스트</span>
           <span class="bar-seg">
@@ -150,7 +158,7 @@
 
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
   <div class="chips" id="chips">
-    <button class="chip on" data-feed="related" type="button">관련 동영상</button>
+    <button class="chip on" data-feed="related" type="button">채널 영상</button>
     <button class="chip" data-feed="search" type="button">검색</button>
     <button class="chip" data-feed="subs" type="button">구독</button>
     <button class="chip" data-feed="favs" type="button">즐겨찾기</button>
@@ -201,8 +209,8 @@
 </div>
 
 <script src="../config.js?v=133"></script>
-<script src="../js/common.js?v=133"></script>
+<script src="../js/common.js?v=134"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=215"></script>
+  <script src="../js/player.js?v=220"></script>
 </body>
 </html>

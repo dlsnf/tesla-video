@@ -21,8 +21,8 @@
     try { localStorage.setItem('tv_token', t); } catch (e) {}
     try {
       var p = base() || '/';
-      document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=' + p + '; max-age=31536000; samesite=lax';
-      if (p !== '/') document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=/; max-age=31536000; samesite=lax';
+      document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=' + p + '; max-age=86400; samesite=lax';
+      if (p !== '/') document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=/; max-age=86400; samesite=lax';
     } catch (e2) {}
     try {
       if (w.history && w.history.replaceState && String(w.location.search || '').indexOf('token=') < 0) {

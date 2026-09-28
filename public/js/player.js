@@ -99,7 +99,7 @@
   var videoCatching = false;
   var audioStarvedSince = 0;
   var videoStartWall = 0;
-  var fsOn = false, tapHide = null, fsControlsTimer = null;
+  var fsOn = false, fsAlign = 'top', tapHide = null, fsControlsTimer = null;
   var soundUnlockBound = false, soundResyncing = false, wantSoundHint = false;
   var currentFeed = 'home';
   var videoAr = 16 / 9;
@@ -598,6 +598,7 @@
   }
 
   function goYtHome() {
+    try { sessionStorage.removeItem('tv_watch_back'); } catch (e0) {}
     try {
       localStorage.setItem('tv_browse', JSON.stringify({ feed: 'home', q: '', selectedCh: '', scroll: 0, ts: Date.now() }));
     } catch (e) {}
@@ -758,14 +759,7 @@
     } else if (pager.mode === 'subchannel') {
       tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(pager.id) + '&limit=' + limit + '&offset=' + pager.offset, done);
     } else if (pager.mode === 'related') {
-      var extra = '';
-      if (watchChannel && watchChannel.channel_id) extra += '&channel_id=' + encodeURIComponent(watchChannel.channel_id);
-      if (watchChannel && watchChannel.name) extra += '&uploader=' + encodeURIComponent(watchChannel.name);
-      var ids = [];
-      if (watchItem && watchItem.id) ids.push(watchItem.id);
-      for (var i = 0; i < lastItems.length; i++) if (lastItems[i] && lastItems[i].id) ids.push(lastItems[i].id);
-      extra += '&exclude=' + encodeURIComponent(ids.join(','));
-      tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&title=' + encodeURIComponent((watchItem && watchItem.title) || '') + extra + '&limit=' + limit + '&offset=' + pager.offset, done);
+      tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&title=' + encodeURIComponent((watchItem && watchItem.title) || '') + relatedRequestExtra(lastItems) + '&limit=' + limit + '&offset=' + pager.offset, done);
     } else {
       pager.busy = false;
       pager.more = false;
@@ -2384,8 +2378,39 @@
     setChip('related');
     showLibTools(false);
     showSubsRail(false);
-    if ($('relH')) $('relH').textContent = '관련 동영상 · 불러오는 중...';
+    if ($('relH')) $('relH').textContent = ((watchChannel && watchChannel.name) ? watchChannel.name + ' · ' : '') + '다른 영상 불러오는 중...';
     renderSkeleton();
+  }
+
+  function relatedRequestExtra(shown) {
+    var extra = '';
+    if (watchChannel && watchChannel.channel_id) extra += '&channel_id=' + encodeURIComponent(watchChannel.channel_id);
+    if (watchChannel && watchChannel.name) extra += '&uploader=' + encodeURIComponent(watchChannel.name);
+    var ids = [];
+    var seen = {};
+    var prev = '';
+    function add(id) {
+      id = String(id || '');
+      if (!id || seen[id] || ids.length >= 16) return;
+      seen[id] = true;
+      ids.push(id);
+    }
+    if (watchItem && watchItem.id) add(watchItem.id);
+    if (watchItem && watchItem.uploaded) extra += '&uploaded=' + encodeURIComponent(String(watchItem.uploaded));
+    var hist = historyGet();
+    var i;
+    for (i = 0; i < hist.length; i++) {
+      var hid = hist[i] && hist[i].id;
+      if (!hid || (watchItem && hid === watchItem.id)) continue;
+      if (!prev) prev = hid;
+      add(hid);
+    }
+    if (shown) {
+      for (i = 0; i < shown.length; i++) add(shown[i] && shown[i].id);
+    }
+    if (prev) extra += '&prev=' + encodeURIComponent(prev);
+    if (ids.length) extra += '&exclude=' + encodeURIComponent(ids.join(','));
+    return extra;
   }
 
   function loadRelated(id, title, seq) {
@@ -2396,15 +2421,12 @@
     showLibTools(false);
     showSubsRail(false);
     resetPager('related');
-    if ($('relH')) $('relH').textContent = '관련 동영상 · 불러오는 중...';
+    if ($('relH')) $('relH').textContent = ((watchChannel && watchChannel.name) ? watchChannel.name + ' · ' : '') + '다른 영상 불러오는 중...';
     if (list && !list.querySelector('.yt-card')) showRelatedLoading();
-    var extra = '';
-    if (watchChannel && watchChannel.channel_id) extra += '&channel_id=' + encodeURIComponent(watchChannel.channel_id);
-    if (watchChannel && watchChannel.name) extra += '&uploader=' + encodeURIComponent(watchChannel.name);
-    tv.get('/api/youtube/related?id=' + encodeURIComponent(id || '') + '&title=' + encodeURIComponent(title || '') + extra + '&limit=8', function (code, data) {
+    tv.get('/api/youtube/related?id=' + encodeURIComponent(id || '') + '&title=' + encodeURIComponent(title || '') + relatedRequestExtra(null) + '&limit=8', function (code, data) {
       if (!stillReq(seq)) return;
       if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
-      if ($('relH')) $('relH').textContent = '관련 동영상';
+      if ($('relH')) $('relH').textContent = (watchChannel && watchChannel.name) ? (watchChannel.name + '의 다른 영상') : '이 채널의 다른 영상';
       if (data && data.ok) {
         lastItems = data.items || [];
         pager.offset = lastItems.length;
@@ -3772,9 +3794,13 @@
   function applyChrome() {
     var box = $('playerBox');
     if (!box) return;
+    var controls = box.classList.contains('controls-visible');
     var cls = 'player-box on';
     if (fsOn) cls += ' fs';
+    if (fsOn && fsAlign === 'center') cls += ' fs-center';
+    if (fsOn && fsAlign === 'bottom') cls += ' fs-bottom';
     if (paused) cls += ' paused';
+    if (controls) cls += ' controls-visible';
     box.className = cls;
     document.body.className = fsOn ? 'player-fs' : '';
     if ($('btnFs')) $('btnFs').textContent = fsOn ? '전체화면 종료' : '전체화면';
@@ -3818,13 +3844,23 @@
     wrap.style.paddingBottom = '0';
     wrap.style.position = 'absolute';
     wrap.style.left = '50%';
-    wrap.style.top = '50%';
-    wrap.style.right = '';
-    wrap.style.bottom = '';
+    wrap.style.right = 'auto';
     wrap.style.width = w + 'px';
     wrap.style.height = h + 'px';
     wrap.style.margin = '0';
-    wrap.style.transform = 'translate(-50%, -50%)';
+    if (fsAlign === 'bottom') {
+      wrap.style.top = 'auto';
+      wrap.style.bottom = '0';
+      wrap.style.transform = 'translate(-50%, 0)';
+    } else if (fsAlign === 'center') {
+      wrap.style.top = '50%';
+      wrap.style.bottom = 'auto';
+      wrap.style.transform = 'translate(-50%, -50%)';
+    } else {
+      wrap.style.top = '0';
+      wrap.style.bottom = 'auto';
+      wrap.style.transform = 'translate(-50%, 0)';
+    }
   }
 
   function setFs(on) {
@@ -3878,11 +3914,53 @@
     requestSoundSync();
   }
 
+  function readWatchBack() {
+    try { return JSON.parse(sessionStorage.getItem('tv_watch_back') || '[]'); } catch (e) { return []; }
+  }
+
+  function writeWatchBack(list) {
+    try { sessionStorage.setItem('tv_watch_back', JSON.stringify((list || []).slice(-20))); } catch (e) {}
+  }
+
   function goWatch(id, url) {
     saveBrowseState();
     rememberWatch(id, url);
+    if (stage) {
+      var curId = (watchItem && watchItem.id) || qsVal('v') || '';
+      var curUrl = (watchItem && watchItem.url) || qsVal('url') || '';
+      if ((curId && curId !== id) || (!curId && curUrl && curUrl !== url)) {
+        var stack = readWatchBack();
+        var top = stack.length ? stack[stack.length - 1] : null;
+        if (!top || top.id !== curId || (!curId && top.url !== curUrl)) stack.push({ id: curId, url: curUrl });
+        writeWatchBack(stack);
+      }
+    } else {
+      writeWatchBack([]);
+    }
     if (id) location.href = tv.url('/watch/?v=' + encodeURIComponent(id));
     else if (url) location.href = tv.url('/watch/?url=' + encodeURIComponent(url));
+  }
+
+  function backWatch() {
+    var curId = (watchItem && watchItem.id) || qsVal('v') || '';
+    var stack = readWatchBack();
+    var prev = null;
+    while (stack.length) {
+      prev = stack.pop();
+      if (prev && ((prev.id && prev.id !== curId) || (!prev.id && prev.url))) break;
+      prev = null;
+    }
+    writeWatchBack(stack);
+    stop(false);
+    if (prev && prev.id) {
+      location.replace(tv.url('/watch/?v=' + encodeURIComponent(prev.id)));
+      return;
+    }
+    if (prev && prev.url) {
+      location.replace(tv.url('/watch/?url=' + encodeURIComponent(prev.url)));
+      return;
+    }
+    location.href = tv.url('/player/');
   }
 
   function clearWatchSearchResults() {
@@ -3974,8 +4052,7 @@
   }
   if ($('btnWatchReload')) $('btnWatchReload').onclick = function () { reloadWatch(); };
   if ($('btnWatchBack')) $('btnWatchBack').onclick = function () {
-    stop(false);
-    location.href = tv.url('/player/');
+    backWatch();
   };
   if ($('btnBotHelp')) $('btnBotHelp').onclick = function () {
     location.href = tv.url('/help/youtube/');
@@ -4150,6 +4227,11 @@
     var n = parseInt(el.getAttribute('data-buf'), 10);
     bufTarget = (n === 10 || n === 20 || n === 30) ? n : 20;
     applyStreamHold();
+  }, false);
+  bindToggleBtns('.abtn', 'abtn', function (el) {
+    var align = el.getAttribute('data-align');
+    fsAlign = (align === 'center' || align === 'bottom') ? align : 'top';
+    if (fsOn) applyChrome();
   }, false);
 
   function eventSubEl(from) {
