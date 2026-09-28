@@ -782,6 +782,18 @@ function parseKoViews(s) {
   return Math.round(n);
 }
 
+function metaBits(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return { published: '', viewsText: '' };
+  var published = '';
+  var viewsText = '';
+  const pub = t.match(/(\d+\s*(?:주일|주|개월|달|월|시간|분|일|년)\s*전|방금(?:\s*전)?)/);
+  if (pub) published = pub[1];
+  const views = t.match(/조회수\s*[\d.]+\s*(?:억|만|천)?\s*회?|[\d.]+\s*(?:억|만|천)\s*회|[\d.]+\s*회|[\d.]+\s*[KMB]\s*views?/i);
+  if (views) viewsText = views[0];
+  return { published: published, viewsText: viewsText };
+}
+
 function overlayLength(v) {
   const arr = (v && v.thumbnailOverlays) || [];
   for (var i = 0; i < arr.length; i++) {
@@ -832,16 +844,17 @@ function mapInnertubeVideo(v) {
   const a11y = ((((v.title || {}).accessibility || {}).accessibilityData) || {}).label
     || ((((v.accessibility || {}).accessibilityData) || {}).label)
     || '';
-  const a11yPub = (String(a11y).match(/(\d+\s*(?:주일|주|개월|시간|분|일|년)\s*전)/) || [])[1] || '';
-  const published = textOf(v.publishedTimeText) || a11yPub;
+  const bits = metaBits([textOf(v.viewCountText), textOf(v.shortViewCountText), textOf(v.publishedTimeText), a11y].join(' '));
+  const published = textOf(v.publishedTimeText) || bits.published;
   const uploaded = parsePublishedText(published);
+  const viewsText = textOf(v.shortViewCountText) || textOf(v.viewCountText) || bits.viewsText;
   return {
     id: id,
     title: textOf(v.title) || id,
     duration: parseLen(textOf(v.lengthText) || overlayLength(v)),
     uploader: textOf(v.ownerText) || textOf(v.shortBylineText) || textOf(v.longBylineText) || textOf(owner.title) || '',
-    views: parseKoViews(textOf(v.viewCountText) || textOf(v.shortViewCountText)),
-    views_text: textOf(v.shortViewCountText) || textOf(v.viewCountText) || '',
+    views: parseKoViews(viewsText),
+    views_text: viewsText,
     channel_id: (chId && chId.indexOf('UC') === 0) ? chId : '',
     avatar: pickThumbUrl(chThumbs) || '',
     ts: uploaded,
@@ -892,15 +905,25 @@ function mapLockupVideo(v) {
   var viewsText = '';
   var published = '';
   parts.forEach(function (t) {
-    if (/전$|ago$/i.test(t) || t === '방금') {
-      if (!published) published = t;
-    } else if (/조회수|views?/i.test(t) || /\d/.test(t) && /회$/.test(t)) {
-      if (!views) views = parseKoViews(t);
-      if (!viewsText) viewsText = t;
-    } else if (!uploader && t.length < 80) {
-      uploader = t;
+    const bits = metaBits(t);
+    if (bits.published && !published) published = bits.published;
+    if (bits.viewsText && !viewsText) {
+      viewsText = bits.viewsText;
+      if (!views) views = parseKoViews(bits.viewsText);
     }
+    if (!bits.published && !bits.viewsText && !uploader && t.length < 80) uploader = t;
   });
+  if (!published || !views) {
+    const extra = findNestedString(v, function (s) {
+      return /조회수|회$|\d+\s*(?:주일|주|개월|시간|분|일|년)\s*전/.test(s);
+    }, 0);
+    const bits = metaBits(extra);
+    if (!published && bits.published) published = bits.published;
+    if (!viewsText && bits.viewsText) {
+      viewsText = bits.viewsText;
+      views = parseKoViews(bits.viewsText);
+    }
+  }
   const durStr = findNestedString(v.contentImage, function (s) { return /^\d{1,2}:\d{2}(:\d{2})?$/.test(s); }, 0);
   const avatar = findNestedString(meta, function (s) { return /yt3\.(ggpht|googleusercontent)/i.test(s); }, 0);
   const uploaded = parsePublishedText(published);
@@ -1276,35 +1299,37 @@ async function searchYoutubeWithChannels(query, limit, offset) {
   return { items: items, channels: channels };
 }
 
-function nextChannelVideos(channel, vid, prevId, currentTs) {
+function nextChannelVideos(channel, vid, currentTs) {
   const rows = (channel || []).filter(function (it) { return it && it.id; });
   var idx = -1;
-  for (var i = 0; i < rows.length; i++) {
+  var i;
+  for (i = 0; i < rows.length; i++) {
     if (rows[i].id === vid) { idx = i; break; }
   }
-  var seq;
-  if (idx >= 0 && idx < rows.length - 1) seq = rows.slice(idx + 1);
-  else if (idx >= 0) seq = rows.slice(0, idx);
+  // Newest first. The next video is the following row, then the newest row
+  // after the oldest one.
+  var seq = [];
+  if (idx >= 0) seq = rows.slice(idx + 1).concat(rows.slice(0, idx));
   else if (currentTs > 0) {
-    seq = rows.filter(function (it) { return it.uploaded && it.uploaded < currentTs; });
-    seq.sort(function (a, b) { return (b.uploaded || 0) - (a.uploaded || 0); });
-    if (!seq.length) {
-      seq = rows.filter(function (it) { return it.id !== vid; });
-      seq.sort(function (a, b) { return (b.uploaded || 0) - (a.uploaded || 0); });
+    for (i = 0; i < rows.length; i++) {
+      if (rows[i].id !== vid && rows[i].uploaded && rows[i].uploaded < currentTs) seq.push(rows[i]);
     }
-  } else seq = rows.filter(function (it) { return it.id !== vid; });
-  return seq.filter(function (it) { return it.id !== vid && it.id !== prevId; });
+  }
+  return seq.filter(function (it) { return it.id !== vid; });
 }
 
-async function channelVideosUntilCurrent(channelId, uploader, vid) {
+async function channelNewest(channelId, offset, limit, excludeId) {
+  const url = channelPageUrl(channelId);
+  if (!url) return [];
   const pageSize = 30;
+  const start = Math.max(0, parseInt(offset, 10) || 0);
+  const count = Math.max(1, parseInt(limit, 10) || 8);
+  const need = start + count + (excludeId ? 1 : 0);
   const seen = {};
   const all = [];
-  var found = !vid;
-  var extraPage = false;
-  for (var off = 0; off < 150; off += pageSize) {
+  for (var off = 0; off < 240 && all.length < need; off += pageSize) {
     var batch = [];
-    try { batch = await youtubeChannelVideos(channelId, pageSize, uploader, off); } catch (e) { break; }
+    try { batch = await cachedChannelFeed(url, pageSize, off); } catch (e) { break; }
     if (!batch || !batch.length) break;
     var added = 0;
     for (var i = 0; i < batch.length; i++) {
@@ -1312,15 +1337,98 @@ async function channelVideosUntilCurrent(channelId, uploader, vid) {
       if (!it || !it.id || seen[it.id]) continue;
       if (channelId && it.channel_id && it.channel_id !== channelId) continue;
       seen[it.id] = true;
-      all.push(it);
       added += 1;
-      if (vid && it.id === vid) found = true;
+      if (excludeId && it.id === excludeId) continue;
+      all.push(it);
     }
     if (!added) break;
-    if (found) {
-      if (extraPage) break;
-      extraPage = true;
+  }
+  return all.slice(start, start + count);
+}
+
+async function videoStat(id) {
+  const key = 'vstat|' + id;
+  const hit = cacheGet(searchCache, key, 6 * 60 * 60 * 1000);
+  if (hit) return hit;
+  const json = await httpsJson('www.youtube.com', '/youtubei/v1/player?prettyPrint=false', {
+    context: innertubeContext(),
+    videoId: id,
+    contentCheckOk: true,
+    racyCheckOk: true,
+  }, 4500);
+  const views = parseInt(((json.videoDetails || {}).viewCount), 10) || 0;
+  const micro = ((json.microformat || {}).playerMicroformatRenderer) || {};
+  const uploaded = Date.parse(micro.publishDate || micro.uploadDate || '') || 0;
+  const stat = { views: views, uploaded: uploaded > 0 ? uploaded : 0 };
+  if (stat.views || stat.uploaded) cacheSet(searchCache, key, stat);
+  return stat;
+}
+
+async function fillItemStats(items) {
+  const list = items || [];
+  const missing = [];
+  const seen = {};
+  list.forEach(function (it) {
+    if (!it || !it.id || seen[it.id]) return;
+    if ((parseInt(it.views, 10) || 0) > 0 && (parseInt(it.uploaded, 10) || 0) > 0) return;
+    seen[it.id] = true;
+    missing.push(it.id);
+  });
+  const cap = missing.slice(0, 40);
+  const found = {};
+  var cursor = 0;
+  async function worker() {
+    while (cursor < cap.length) {
+      const id = cap[cursor++];
+      try { found[id] = await videoStat(id); } catch (e) { found[id] = null; }
     }
+  }
+  const jobs = [];
+  const workers = Math.min(4, cap.length);
+  for (var w = 0; w < workers; w++) jobs.push(worker());
+  if (jobs.length) await Promise.all(jobs);
+  list.forEach(function (it) {
+    const st = it && found[it.id];
+    if (!st) return;
+    if (!((parseInt(it.views, 10) || 0) > 0) && st.views > 0) it.views = st.views;
+    if (!((parseInt(it.uploaded, 10) || 0) > 0) && st.uploaded > 0) it.uploaded = st.uploaded;
+  });
+  return list;
+}
+
+async function cachedChannelFeed(url, limit, offset) {
+  const key = 'chfeed|' + offset + '|' + limit + '|' + url;
+  const hit = cacheGet(searchCache, key, 10 * 60 * 1000);
+  if (hit) return hit;
+  const items = await youtubeFeed(url, limit, 15000, offset);
+  if (items && items.length) cacheSet(searchCache, key, items);
+  return items || [];
+}
+
+async function channelVideosUntilCurrent(channelId, uploader, vid, needAfter) {
+  const url = channelPageUrl(channelId);
+  if (!url) return [];
+  const pageSize = 30;
+  const want = Math.max(8, parseInt(needAfter, 10) || 8);
+  const seen = {};
+  const all = [];
+  var foundAt = -1;
+  for (var off = 0; off < 240; off += pageSize) {
+    var batch = [];
+    try { batch = await cachedChannelFeed(url, pageSize, off); } catch (e) { break; }
+    if (!batch || !batch.length) break;
+    var added = 0;
+    for (var i = 0; i < batch.length; i++) {
+      var it = batch[i];
+      if (!it || !it.id || seen[it.id]) continue;
+      if (channelId && it.channel_id && it.channel_id !== channelId) continue;
+      seen[it.id] = true;
+      if (vid && it.id === vid) foundAt = all.length;
+      all.push(it);
+      added += 1;
+    }
+    if (!added) break;
+    if (foundAt >= 0 && all.length >= foundAt + 1 + want) break;
   }
   return all;
 }
@@ -1332,14 +1440,16 @@ async function youtubeRelated(id, title, limit, extra) {
   const vid = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
   const channelId = String(extra.channel_id || '').replace(/[^a-zA-Z0-9_@-]/g, '');
   const uploader = String(extra.uploader || extra.channel || '').slice(0, 80);
-  const prevId = String(extra.prev || '').replace(/[^a-zA-Z0-9_-]/g, '');
   const currentTs = asMs(extra.uploaded);
-  let channel = [];
-  if (channelId || uploader) {
-    try { channel = await channelVideosUntilCurrent(channelId, uploader, vid); } catch (e) {}
+  if (String(extra.pick || '') === 'next') {
+    let channel = [];
+    if (channelId) {
+      try { channel = await channelVideosUntilCurrent(channelId, uploader, vid, 1); } catch (e) {}
+    }
+    return nextChannelVideos(channel, vid, currentTs).slice(0, n);
   }
-  const seq = nextChannelVideos(channel, vid, prevId, currentTs);
-  return seq.slice(offset, offset + n);
+  if (!channelId) return [];
+  try { return await channelNewest(channelId, offset, n, ''); } catch (e) { return []; }
 }
 
 async function youtubeComments(id, limit, offset, sort) {
@@ -1571,6 +1681,7 @@ module.exports = {
   subscriptionFeed,
   channelMeta,
   fillChannelAvatars,
+  fillItemStats,
   stampItemAvatars,
   channelScore,
   twitchStatus,

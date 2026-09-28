@@ -15,6 +15,7 @@ const youtubeOauth = require('./youtube-oauth');
 const favorites = require('./favorites');
 const subscriptions = require('./subscriptions');
 const history = require('./history');
+const prefs = require('./prefs');
 const { run } = require('./proc');
 
 if (!fs.existsSync(config.PUBLIC_DIR)) fs.mkdirSync(config.PUBLIC_DIR, { recursive: true });
@@ -347,10 +348,28 @@ app.get('/api/youtube/status', function (req, res) {
   });
 });
 
-app.get('/api/favorites', function (req, res) {
+app.get('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  res.json({ ok: true, pin: pin, items: favorites.read(pin) });
+  res.json({ ok: true, pin: pin, autoplayNext: prefs.read(pin).autoplayNext });
+});
+
+app.post('/api/prefs', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const saved = prefs.write(pin, req.body || {});
+  res.json({ ok: true, autoplayNext: saved.autoplayNext });
+});
+
+app.get('/api/favorites', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const items = favorites.read(pin);
+  try {
+    await media.fillItemStats(items);
+    favorites.rememberStats(pin, items);
+  } catch (e) {}
+  res.json({ ok: true, pin: pin, items: items });
 });
 
 app.post('/api/favorites/toggle', function (req, res) {
@@ -410,6 +429,7 @@ app.get('/api/subscriptions/feed', async function (req, res) {
   }
   try {
     const items = await media.subscriptionFeed(channels, req.query.limit);
+    await media.fillItemStats(items);
     res.json({ ok: true, items: items, channels: subscriptions.readDecorated(pin) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180), channels: channels, items: [] });
@@ -434,6 +454,7 @@ app.get('/api/subscriptions/channel', async function (req, res) {
   try {
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const items = await media.youtubeChannelVideos(ch.channel_id, req.query.limit || 16, ch.name, offset, { stamp: false });
+    await media.fillItemStats(items);
     if (!offset && items && items[0]) {
       subscriptions.patch(pin, ch.channel_id, {
         last_video_id: items[0].id,
@@ -477,6 +498,7 @@ app.get('/api/youtube/home', async function (req, res) {
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     if (offset > 0) {
       const extra = await media.youtubeHome(n, offset);
+      await media.fillItemStats(extra);
       return res.json({ ok: true, source: 'more', items: extra || [], more: !!(extra && extra.length >= n) });
     }
     const pin = sessionPin(req);
@@ -515,14 +537,18 @@ app.get('/api/youtube/home', async function (req, res) {
         seen[it.id] = true;
         items.push(it);
       });
-      return res.json({ ok: true, source: 'subs', items: items.slice(0, n), more: true });
+      const page = items.slice(0, n);
+      await media.fillItemStats(page);
+      return res.json({ ok: true, source: 'subs', items: page, more: true });
     }
     const items = extra && extra.length ? extra : [];
     const source = items.length ? 'popular' : 'trending';
     if (!items.length) {
       const fallback = await media.youtubeHome(n);
+      await media.fillItemStats(fallback);
       return res.json({ ok: true, source: 'trending', items: fallback || [], more: !!(fallback && fallback.length >= 8) });
     }
+    await media.fillItemStats(items);
     res.json({ ok: true, source: source, items: items, more: !!(items && items.length >= 8) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
@@ -562,6 +588,7 @@ app.get('/api/youtube/search', async function (req, res) {
     (data.channels || []).forEach(addCh);
     await media.fillChannelAvatars(channels);
     const found = data.items || [];
+    await media.fillItemStats(found);
     res.json({ ok: true, items: found, channels: channels, more: found.length >= Math.min(parseInt(req.query.limit, 10) || 16, 16) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
@@ -597,6 +624,7 @@ app.get('/api/youtube/channel', async function (req, res) {
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const limit = req.query.limit || 24;
     const items = await media.youtubeChannelVideos(id, limit, name, offset);
+    await media.fillItemStats(items);
     res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(parseInt(limit, 10) || 16, 16)) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180), items: [] });
@@ -612,7 +640,9 @@ app.get('/api/youtube/related', async function (req, res) {
       exclude: req.query.exclude || '',
       prev: req.query.prev || '',
       uploaded: req.query.uploaded || 0,
+      pick: req.query.pick || '',
     });
+    await media.fillItemStats(items);
     const n = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
     res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(n, 8)) });
   } catch (e) {
@@ -674,6 +704,7 @@ app.get('/api/youtube/subscriptions', async function (req, res) {
   if (gtoken) {
     try {
       const data = await youtubeOauth.subscriptionVideos(gtoken, req.query.limit);
+      await media.fillItemStats(data.items);
       return res.json({ ok: true, items: data.items, channels: data.channels, source: 'oauth' });
     } catch (e) {
       /* fall through to cookies */
@@ -681,6 +712,7 @@ app.get('/api/youtube/subscriptions', async function (req, res) {
   }
   try {
     const items = await media.youtubeSubscriptions(req.query.limit);
+    await media.fillItemStats(items);
     res.json({ ok: true, items: items, source: 'cookies' });
   } catch (e) {
     res.status(401).json({ ok: false, error: e.message.slice(0, 180) });
