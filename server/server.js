@@ -351,14 +351,15 @@ app.get('/api/youtube/status', function (req, res) {
 app.get('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  res.json({ ok: true, pin: pin, autoplayNext: prefs.read(pin).autoplayNext });
+  const saved = prefs.read(pin);
+  res.json({ ok: true, pin: pin, autoplayNext: saved.autoplayNext, volume: saved.volume });
 });
 
 app.post('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
   const saved = prefs.write(pin, req.body || {});
-  res.json({ ok: true, autoplayNext: saved.autoplayNext });
+  res.json({ ok: true, autoplayNext: saved.autoplayNext, volume: saved.volume });
 });
 
 app.get('/api/favorites', async function (req, res) {
