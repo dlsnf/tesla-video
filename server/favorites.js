@@ -50,6 +50,24 @@ function normalize(body) {
   };
 }
 
+function rememberStats(pin, items) {
+  if (!validPin(pin)) return;
+  const list = read(pin);
+  const byId = {};
+  (items || []).forEach(function (it) {
+    if (it && it.id) byId[it.id] = it;
+  });
+  var changed = false;
+  list.forEach(function (it) {
+    const src = byId[it.id];
+    if (!src) return;
+    if (!(it.views > 0) && src.views > 0) { it.views = src.views; changed = true; }
+    if (!(it.uploaded > 0) && src.uploaded > 0) { it.uploaded = src.uploaded; changed = true; }
+    if (!it.published && src.published) { it.published = String(src.published).slice(0, 40); changed = true; }
+  });
+  if (changed) write(pin, list);
+}
+
 function toggle(pin, body) {
   const item = normalize(body);
   if (!item) return { ok: false, error: 'id 없음' };
@@ -71,4 +89,5 @@ module.exports = {
   read,
   write,
   toggle,
+  rememberStats,
 };

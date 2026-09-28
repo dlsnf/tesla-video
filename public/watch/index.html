@@ -6,7 +6,8 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=141">
+<link rel="stylesheet" href="../css/app.css?v=149">
+<style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
 <div id="loadingCurtain" class="loading-curtain on" aria-hidden="true"></div>
@@ -60,11 +61,18 @@
       </div>
       <div class="bar-main">
         <div class="bar-group">
-          <button class="ctrl play" id="btnPause" type="button">일시정지</button>
-          <button class="ctrl" id="btnFromStart" type="button">처음부터</button>
+          <button class="ctrl icon play" id="btnPause" type="button" aria-label="일시정지">
+            <svg class="ico ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>
+            <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5z"/></svg>
+          </button>
+          <button class="ctrl icon" id="btnFromStart" type="button" aria-label="처음부터">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/></svg>
+          </button>
           <button class="ctrl" id="btnBack" type="button">-10</button>
           <button class="ctrl" id="btnFwd" type="button">+10</button>
-          <button class="ctrl" id="btnRepeat" type="button" aria-pressed="false">반복재생</button>
+          <button class="ctrl icon" id="btnRepeat" type="button" aria-label="반복재생" aria-pressed="false">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+          </button>
           <span class="time" id="npTime">0:00</span>
         </div>
         <div class="bar-group">
@@ -72,7 +80,10 @@
             <button class="vol-ico" id="btnMute" type="button">♪</button>
             <input id="vol" class="vol" type="range" min="0" max="100" value="100">
           </span>
-          <button class="ctrl fs" id="btnFs" type="button">전체화면</button>
+          <button class="ctrl fs" id="btnFs" type="button" aria-label="전체화면">
+            <svg class="fs-ico fs-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+            <svg class="fs-ico fs-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+          </button>
         </div>
       </div>
       <div class="bar-main bar-opts">
@@ -83,28 +94,13 @@
             <button class="ctrl qbtn" data-q="480" type="button">480</button>
             <button class="ctrl qbtn" data-q="720" type="button">720</button>
           </span>
-        </div>
-        <div class="bar-group">
-          <span class="bar-lab">프레임</span>
-          <span class="bar-seg">
-            <button class="ctrl fbtn on" data-fps="24" type="button">24</button>
-            <button class="ctrl fbtn" data-fps="30" type="button">30</button>
-          </span>
-        </div>
-        <div class="bar-group">
-          <span class="bar-lab">비트레이트</span>
-          <span class="bar-seg">
-            <button class="ctrl rbtn on" data-vbr="low" type="button">낮음</button>
-            <button class="ctrl rbtn" data-vbr="norm" type="button">보통</button>
-          </span>
-        </div>
-        <div class="bar-group">
-          <span class="bar-lab">버퍼</span>
-          <span class="bar-seg">
-            <button class="ctrl bbtn" data-buf="10" type="button">10초</button>
-            <button class="ctrl bbtn on" data-buf="20" type="button">20초</button>
-            <button class="ctrl bbtn" data-buf="30" type="button">30초</button>
-          </span>
+          <button class="autoplay-toggle" id="btnAutoplay" type="button" role="switch" aria-label="다음 자동 재생" aria-checked="false" aria-pressed="false">
+            <span class="autoplay-label">다음 자동 재생</span>
+            <span class="autoplay-switch" aria-hidden="true">
+              <span class="autoplay-icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+              <span class="autoplay-knob"></span>
+            </span>
+          </button>
         </div>
         <div class="bar-group fs-pos">
           <span class="bar-lab">위치</span>
@@ -112,12 +108,6 @@
             <button class="ctrl abtn on" data-align="top" type="button">상단</button>
             <button class="ctrl abtn" data-align="center" type="button">가운데</button>
             <button class="ctrl abtn" data-align="bottom" type="button">하단</button>
-          </span>
-        </div>
-        <div class="bar-group">
-          <span class="bar-lab">소스 테스트</span>
-          <span class="bar-seg">
-            <button class="ctrl fmtbtn on" data-format="134+140" type="button">H264+AAC</button>
           </span>
         </div>
       </div>
@@ -172,10 +162,9 @@
     <input class="inp" id="libFilter" placeholder="채널명으로 검색">
     <input class="inp" id="libVidFilter" placeholder="제목으로 필터" style="display:none">
     <div class="lib-sorts" id="libSorts">
-      <button class="chip on" data-sort="new" type="button">최신</button>
+      <button class="chip on" data-sort="new" type="button">최신순</button>
       <button class="chip" data-sort="old" type="button">오래된</button>
       <button class="chip" data-sort="title" type="button">제목</button>
-      <button class="chip" data-sort="channel" type="button">채널</button>
       <button class="chip" data-sort="views" type="button">조회수</button>
       <button class="chip" data-sort="dur" type="button">길이</button>
     </div>
@@ -211,6 +200,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=134"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=220"></script>
+  <script src="../js/player.js?v=234"></script>
 </body>
 </html>

@@ -1,6 +1,25 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var stage = $('stage'), na = $('na'), st = $('st'), list = $('list');
+  // The player starts hidden. Showing it, or restoring the last offset on
+  // refresh, was leaving the page scrolled below the video.
+  var stickWatchTop = !!stage;
+  function scrollWatchTop() {
+    try { window.scrollTo(0, 0); } catch (e) {}
+    try {
+      if (document.documentElement) document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+    } catch (e2) {}
+  }
+  if (stage) {
+    try { if (history && 'scrollRestoration' in history) history.scrollRestoration = 'manual'; } catch (e) {}
+    try {
+      document.documentElement.style.overflowAnchor = 'none';
+      document.body.style.overflowAnchor = 'none';
+    } catch (e3) {}
+    scrollWatchTop();
+    window.addEventListener('pageshow', scrollWatchTop);
+  }
   var player = null, playing = null, quality = 360, fps = 24, vbrLow = true, streamFormat = '134+140', startAt = 0;
   var preservedStageFrame = '';
   var stageFrameReady = false, stagePrerollReady = false;
@@ -56,6 +75,13 @@
   var pendingEarlyContinue = false;
   var forceShortFinish = false;
   var repeatEnabled = false;
+  var autoplayNext = false;
+  var autoplayLoaded = false;
+  var endMode = '';
+  var nextToken = 0;
+  var nextItem = null;
+  var nextDue = false;
+  var nextReady = false;
   var repeatTimer = null;
   var repeatAt = 0;
   var endCoastFrom = 0;
@@ -66,6 +92,29 @@
     if (!button) return;
     button.classList.toggle('on', repeatEnabled);
     button.setAttribute('aria-pressed', repeatEnabled ? 'true' : 'false');
+  }
+
+  function paintAutoplayButton() {
+    var button = $('btnAutoplay');
+    if (!button) return;
+    button.classList.toggle('on', autoplayNext);
+    button.setAttribute('aria-pressed', autoplayNext ? 'true' : 'false');
+    button.setAttribute('aria-checked', autoplayNext ? 'true' : 'false');
+  }
+
+  function loadAutoplayPref() {
+    var pin = currentPin;
+    if (!pin) {
+      autoplayNext = false;
+      paintAutoplayButton();
+      return;
+    }
+    tv.get('/api/prefs', function (c, d) {
+      if (pin !== currentPin || autoplayLoaded) return;
+      autoplayLoaded = true;
+      autoplayNext = !!(d && d.ok && d.autoplayNext);
+      paintAutoplayButton();
+    });
   }
   var audioMediaCursor = 0;
   var videoShownAt = 0;
@@ -225,6 +274,7 @@
     var list = $('commentsList');
     if (box) box.style.display = commentsId ? 'block' : 'none';
     if (panel) panel.hidden = true;
+    if ($('commentsPreview')) $('commentsPreview').setAttribute('aria-expanded', 'false');
     if (list) list.innerHTML = '';
     if ($('commentsPreviewText')) $('commentsPreviewText').textContent = commentsId ? '댓글을 불러오는 중...' : '';
     setCommentsState('', false);
@@ -276,6 +326,7 @@
     commentsOpened = true;
     var panel = $('commentsPanel');
     if (panel) panel.hidden = false;
+    if ($('commentsPreview')) $('commentsPreview').setAttribute('aria-expanded', 'true');
     if (commentsLoading) {
       renderCommentsLoading();
       setCommentsState('', false);
@@ -290,6 +341,12 @@
     commentsOpened = false;
     var panel = $('commentsPanel');
     if (panel) panel.hidden = true;
+    if ($('commentsPreview')) $('commentsPreview').setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleComments() {
+    if (commentsOpened) closeComments();
+    else openComments();
   }
 
   function setCommentSort(sort) {
@@ -359,9 +416,9 @@
     var stageLoader = $('stageLoader');
     var stageRepeat = $('stageRepeat');
     var stageRepeatCount = $('stageRepeatCount');
-    var repeatMatch = String(t || '').match(/^(\d+)초 (?:후|뒤에) 다시 재생합니다$/);
+    var repeatMatch = String(t || '').match(/^(\d+)초 (?:후|뒤에) (?:다시 재생합니다|다음 영상을 재생합니다)$/);
     if (stageStatus) {
-      var showStageStatus = /재생할 수 없음|플레이어 오류|종료/.test(String(t || ''));
+      var showStageStatus = /재생할 수 없음|플레이어 오류/.test(String(t || ''));
       stageStatus.textContent = showStageStatus ? t : '';
       stageStatus.className = showStageStatus ? 'stage-status on' : 'stage-status';
     }
@@ -431,6 +488,21 @@
       try { rec = JSON.parse(localStorage.getItem('tv_watch') || 'null'); } catch (e2) {}
     }
     return rec || { v: '', url: '' };
+  }
+
+  function setWatchFrom(from) {
+    try {
+      if (from === 'favs') sessionStorage.setItem('tv_watch_from', 'favs');
+      else sessionStorage.removeItem('tv_watch_from');
+    } catch (e) {}
+  }
+
+  // A video opened from the favorites tab keeps that list. The address is the
+  // source of truth so a refresh does not fall back to the channel list.
+  function watchFromFavs() {
+    if (qsVal('from') === 'favs') return true;
+    if (qsVal('v') || qsVal('url')) return false;
+    try { return sessionStorage.getItem('tv_watch_from') === 'favs'; } catch (e) { return false; }
   }
 
   function historyGet() {
@@ -677,8 +749,10 @@
     var ago = tv.fmtAgo(it.uploaded) || cleanName(it.published || '');
     var on = !!(it.id && favIds[it.id]);
     var chName = cardChannelName(it);
-    var html = '<div class="yt-card" data-id="' + escapeHtml(it.id || '') + '" data-url="' + escapeHtml(it.url || ('https://www.youtube.com/watch?v=' + it.id)) + '">';
+    var playingNow = !!(stage && watchItem && it.id && watchItem.id === it.id);
+    var html = '<div class="yt-card' + (playingNow ? ' is-playing' : '') + '" data-id="' + escapeHtml(it.id || '') + '" data-url="' + escapeHtml(it.url || ('https://www.youtube.com/watch?v=' + it.id)) + '">';
     html += '<div class="yt-thumb-wrap"><img src="' + escapeHtml(it.thumbnail || '') + '" alt="" loading="lazy" decoding="async">';
+    if (playingNow) html += '<span class="yt-now-shade" aria-hidden="true"></span><span class="yt-now">지금 재생 중</span>';
     html += '<button type="button" class="star-btn' + (on ? ' on' : '') + '" data-star="' + escapeHtml(it.id || '') + '" aria-label="즐겨찾기">';
     html += '<svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg></button>';
     if (dur) html += '<span class="yt-dur">' + dur + '</span>';
@@ -732,7 +806,7 @@
     var done = function (code, data) {
       if (!stillReq(seq) || pager.mode !== mode) return;
       pager.busy = false;
-      var add = uniqueNew(pager.mode === 'subchannel' ? libRaw : lastItems, (data && data.items) || []);
+      var add = uniqueNew((pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search'))) ? libRaw : lastItems, (data && data.items) || []);
       if (!data || !data.ok || !add.length) {
         pager.more = false;
         paintMoreBar();
@@ -740,8 +814,9 @@
       }
       pager.offset += add.length;
       pager.more = data.more !== false && add.length >= 8;
-      if (pager.mode === 'subchannel') {
+      if (pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search'))) {
         libRaw = libRaw.concat(add);
+        if (mode === 'search') lastSearchItems = libRaw.slice();
         applyLibView();
       } else {
         lastItems = lastItems.concat(add);
@@ -854,8 +929,6 @@
     }
     if ($('libVidFilter')) $('libVidFilter').style.display = kind === 'subs' ? 'block' : 'none';
     if ($('libSorts')) $('libSorts').style.display = on ? '' : 'none';
-    var chBtn = $('libSorts') && $('libSorts').querySelector('[data-sort="channel"]');
-    if (chBtn) chBtn.style.display = kind === 'subs' ? 'none' : '';
   }
 
   function resetLib() {
@@ -870,11 +943,6 @@
         btns[i].className = 'chip' + (btns[i].getAttribute('data-sort') === 'new' ? ' on' : '');
       }
     }
-  }
-
-  function hasTs(arr) {
-    for (var i = 0; i < arr.length; i++) if (arr[i] && arr[i].ts) return true;
-    return false;
   }
 
   function applyLibView(emptyText) {
@@ -897,27 +965,40 @@
     }
     if (libSort === 'title') {
       items.sort(function (a, b) { return String(a.title || '').localeCompare(String(b.title || ''), 'ko'); });
-    } else if (libSort === 'channel') {
-      items.sort(function (a, b) {
-        return String(a.uploader || a.name || '').localeCompare(String(b.uploader || b.name || ''), 'ko');
-      });
     } else if (libSort === 'views') {
       items.sort(function (a, b) { return (b.views || 0) - (a.views || 0); });
     } else if (libSort === 'dur') {
       items.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
     } else if (libSort === 'old') {
-      if (hasTs(items)) items.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+      if (hasSortTime(items)) items.sort(function (a, b) { return sortTime(a) - sortTime(b); });
       else items.reverse();
-    } else if (libSort === 'new' && hasTs(items)) {
-      items.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+    } else if (libSort === 'new' && hasSortTime(items)) {
+      items.sort(function (a, b) { return sortTime(b) - sortTime(a); });
     }
     lastItems = items;
-    lastChannels = [];
+    var channels = currentFeed === 'search' ? (lastChannels || []) : [];
+    if (currentFeed !== 'search') lastChannels = [];
     if (currentFeed === 'subs') {
       renderRail();
       if (!selectedCh) return;
     }
-    renderItems(items, libEmpty, []);
+    renderItems(items, libEmpty, channels);
+  }
+
+  function sortTime(it) {
+    if (!it) return 0;
+    if (currentFeed === 'related' || currentFeed === 'search') return it.uploaded || it.ts || 0;
+    return it.ts || it.uploaded || 0;
+  }
+
+  function hasSortTime(arr) {
+    for (var i = 0; i < arr.length; i++) if (sortTime(arr[i])) return true;
+    return false;
+  }
+
+  function showWatchFilters() {
+    if (!stage) return;
+    showLibTools(true, 'watch');
   }
 
   function showSubsRail(on) {
@@ -1260,7 +1341,8 @@
     lastQuery = q;
     lastChannels = [];
     setChip(chip || 'search');
-    showLibTools(false);
+    if (stage && (!chip || chip === 'search')) showWatchFilters();
+    else showLibTools(false);
     showSubsRail(false);
     saveBrowseState();
     resetPager('search', { q: q });
@@ -1291,7 +1373,12 @@
       var extra = lastChannels.length ? (' · 채널 ' + lastChannels.length + '개') : '';
       var label = chip && chip !== 'search' ? (chip === 'news' ? '뉴스' : chip === 'music' ? '음악' : chip === 'game' ? '게임' : q) : ('"' + q + '" 검색 결과');
       setStatus(label + ' ' + lastItems.length + '개' + extra);
-      renderItems(lastItems, '검색 결과 없음', lastChannels);
+      if (stage && (!chip || chip === 'search')) {
+        libRaw = lastItems.slice();
+        applyLibView('검색 결과 없음');
+      } else {
+        renderItems(lastItems, '검색 결과 없음', lastChannels);
+      }
     });
   }
 
@@ -1936,15 +2023,28 @@
     pausePos = duration > 0 ? duration : currentPos();
     disableReconnect();
     holdPlayback();
-    if ($('btnPause')) $('btnPause').textContent = '재생';
+    paintPlayButton();
     applyChrome();
     paintSeekBar();
     setStatus('종료');
-    scheduleRepeatPlayback();
+    if (repeatEnabled) scheduleRepeatPlayback();
+    else if (autoplayNext) scheduleNextPlayback();
+  }
+
+  function clearEndTimer() {
+    if (repeatTimer) { clearTimeout(repeatTimer); repeatTimer = null; }
+    repeatAt = 0;
+    endMode = '';
+    nextDue = false;
+    nextItem = null;
+    nextReady = false;
+    nextToken += 1;
   }
 
   function scheduleRepeatPlayback() {
-    if (!repeatEnabled || !playing || isLive || repeatTimer) return;
+    if (!repeatEnabled || !playing || isLive) return;
+    clearEndTimer();
+    endMode = 'repeat';
     var src = playing;
     repeatAt = Date.now() + 3000;
     setStatus('3초 뒤에 다시 재생합니다');
@@ -1960,6 +2060,149 @@
       }
       debugPlayback('repeat-restart', { requestedStart: 0, lastPosition: lastPlaybackPos });
       playUrl(src, 0, { skipInfo: false, repeat: true });
+    }, 3000);
+  }
+
+  function favsNewest(items) {
+    var rows = [];
+    for (var i = 0; i < (items || []).length; i++) {
+      if (items[i] && items[i].id) rows.push(items[i]);
+    }
+    if (rows.some(function (it) { return it.ts; })) {
+      rows.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+    }
+    return rows;
+  }
+
+  function nextFavItem(items, currentId) {
+    var rows = favsNewest(items);
+    if (rows.length < 2) return null;
+    var idx = -1;
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      if (rows[i].id === currentId) { idx = i; break; }
+    }
+    if (idx < 0) {
+      for (i = 0; i < rows.length; i++) if (rows[i].id !== currentId) return rows[i];
+      return null;
+    }
+    return rows[(idx + 1) % rows.length];
+  }
+
+  function showWatchFavs(opts) {
+    opts = opts || {};
+    if (!list) return;
+    var seq = opts.keepSeq ? reqSeq : beginReq();
+    setChip('favs');
+    showWatchFilters();
+    showSubsRail(false);
+    resetPager('favs');
+    pager.more = false;
+    paintMoreBar();
+    if (!list.querySelector('.yt-card')) renderSkeleton();
+    tv.get('/api/favorites', function (code, data) {
+      if (!stillReq(seq) || currentFeed !== 'favs') return;
+      var items = (data && data.ok && data.items) || [];
+      for (var i = 0; i < items.length; i++) favIds[items[i].id] = items[i];
+      paintWatchStar();
+      libRaw = items;
+      applyLibView(data && data.ok ? '즐겨찾기가 없습니다' : '즐겨찾기를 불러오지 못했습니다');
+    });
+  }
+
+  function autoRunCount() {
+    try { return parseInt(sessionStorage.getItem('tv_auto_run') || '0', 10) || 0; }
+    catch (e) { return 0; }
+  }
+
+  function setAutoRunCount(n) {
+    try { sessionStorage.setItem('tv_auto_run', String(Math.max(0, n || 0))); } catch (e) {}
+  }
+
+  function hideAutoAsk() {
+    var el = $('autoAsk');
+    if (el) el.className = 'auto-ask';
+  }
+
+  function showAutoAsk() {
+    var el = $('autoAsk');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'autoAsk';
+      el.className = 'auto-ask';
+      el.innerHTML = '<div class="auto-ask-box"><h2>다음 영상을 재생할까요?</h2><p>자동으로 10개 영상을 재생했습니다.</p><div class="auto-ask-actions"><button type="button" class="btn btn-gray" id="autoAskNo">그만</button><button type="button" class="btn btn-red" id="autoAskYes">재생</button></div></div>';
+      document.body.appendChild(el);
+      $('autoAskYes').onclick = function () {
+        hideAutoAsk();
+        if (!nextItem) { setStatus('종료'); return; }
+        startNextVideo(true);
+      };
+      $('autoAskNo').onclick = function () {
+        hideAutoAsk();
+        nextItem = null;
+        nextDue = false;
+        setStatus('종료');
+      };
+    }
+    el.className = 'auto-ask on';
+    setStatus('다음 영상을 재생할까요?');
+  }
+
+  function startNextVideo(confirmed) {
+    nextDue = false;
+    if (repeatEnabled || !autoplayNext || !ended || !nextItem) {
+      if (ended && !repeatEnabled) setStatus('종료');
+      return;
+    }
+    var item = nextItem;
+    nextItem = null;
+    goWatch(item.id, item.url, { keepFrom: true, auto: true, resetRun: !!confirmed });
+  }
+
+  function scheduleNextPlayback() {
+    if (repeatEnabled || !autoplayNext || !playing || isLive) return;
+    clearEndTimer();
+    endMode = 'next';
+    var src = playing;
+    var token = nextToken;
+    var limited = autoRunCount() >= 10;
+    if (!limited) {
+      repeatAt = Date.now() + 3000;
+      setStatus('3초 뒤에 다음 영상을 재생합니다');
+    } else {
+      setStatus('다음 영상을 확인하는 중...');
+    }
+    function gotNext(item) {
+      if (token !== nextToken) return;
+      nextReady = true;
+      nextItem = item || null;
+      if (limited) {
+        if (!nextItem) { setStatus('종료'); return; }
+        showAutoAsk();
+        return;
+      }
+      if (nextDue) startNextVideo(false);
+    }
+    if (watchFromFavs()) {
+      tv.get('/api/favorites', function (code, data) {
+        gotNext(nextFavItem((data && data.ok && data.items) || [], (watchItem && watchItem.id) || ''));
+      });
+    } else {
+      tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&title=' + encodeURIComponent((watchItem && watchItem.title) || '') + relatedRequestExtra(null) + '&pick=next&limit=1', function (code, data) {
+        gotNext((data && data.ok && data.items && data.items[0]) || null);
+      });
+    }
+    if (limited) return;
+    repeatTimer = setTimeout(function () {
+      repeatTimer = null;
+      repeatAt = 0;
+      if (repeatEnabled || !autoplayNext || !src || playing !== src || !ended) return;
+      if (!nextReady) {
+        nextDue = true;
+        setStatus('다음 영상을 불러오는 중...');
+        return;
+      }
+      startNextVideo(false);
     }, 3000);
   }
 
@@ -2174,8 +2417,7 @@
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
     if (seekDebounce) { clearTimeout(seekDebounce); seekDebounce = null; }
-    if (repeatTimer) { clearTimeout(repeatTimer); repeatTimer = null; }
-    repeatAt = 0;
+    clearEndTimer();
     endCoastFrom = 0;
     endCoastPos = 0;
     earlyResumeAt = -1;
@@ -2210,12 +2452,12 @@
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     bufEnd = 0;
     measuredVideoBps = 0;
-    if ($('btnPause')) $('btnPause').textContent = '일시정지';
+    paintPlayButton();
     if (!keepBox) {
       fsOn = false;
       document.body.className = '';
       if ($('playerBox')) $('playerBox').className = 'player-box';
-      if ($('btnFs')) $('btnFs').textContent = '전체화면';
+      paintFsButton();
     } else {
       applyChrome();
     }
@@ -2275,12 +2517,11 @@
     if (keepPaused) {
       paused = true;
       pausePos = startAt;
-      if ($('btnPause')) $('btnPause').textContent = '재생';
     } else {
       paused = false;
       pausePos = -1;
-      if ($('btnPause')) $('btnPause').textContent = '일시정지';
     }
+    paintPlayButton();
     applyChrome();
     $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · 0 FPS';
     if (skipInfo) {
@@ -2315,6 +2556,7 @@
         soundResyncing = false;
         setStatus((info && info.error) || '영상을 열 수 없습니다. 다른 영상을 선택해 보세요.');
         if ($('npTitle')) $('npTitle').textContent = '재생할 수 없음';
+        if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related') showWatchFavs({ keepSeq: true });
         return;
       }
       duration = info.duration || 0;
@@ -2362,21 +2604,25 @@
       pipeLegacy = useLegacy;
       startPipes(src);
       if (relatedTimer) clearTimeout(relatedTimer);
-      var keepTab = currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs';
-      if (!keepTab) showRelatedLoading();
-      relatedTimer = setTimeout(function () {
-        relatedTimer = null;
-        if (!stillReq(playSeq)) return;
-        if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
-        loadRelated(info.id, info.title, playSeq);
-      }, 400);
+      var keepTab = currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs());
+      if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related') {
+        showWatchFavs({ keepSeq: true });
+      } else if (!keepTab) {
+        showRelatedLoading();
+        relatedTimer = setTimeout(function () {
+          relatedTimer = null;
+          if (!stillReq(playSeq)) return;
+          if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
+          loadRelated(info.id, info.title, playSeq);
+        }, 400);
+      }
     });
   }
 
   function showRelatedLoading() {
     if (!list || !stage) return;
     setChip('related');
-    showLibTools(false);
+    showWatchFilters();
     showSubsRail(false);
     if ($('relH')) $('relH').textContent = ((watchChannel && watchChannel.name) ? watchChannel.name + ' · ' : '') + '다른 영상 불러오는 중...';
     renderSkeleton();
@@ -2418,7 +2664,7 @@
     if (seq == null) seq = reqSeq;
     lastChannels = [];
     setChip('related');
-    showLibTools(false);
+    showWatchFilters();
     showSubsRail(false);
     resetPager('related');
     if ($('relH')) $('relH').textContent = ((watchChannel && watchChannel.name) ? watchChannel.name + ' · ' : '') + '다른 영상 불러오는 중...';
@@ -2428,12 +2674,13 @@
       if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
       if ($('relH')) $('relH').textContent = (watchChannel && watchChannel.name) ? (watchChannel.name + '의 다른 영상') : '이 채널의 다른 영상';
       if (data && data.ok) {
-        lastItems = data.items || [];
-        pager.offset = lastItems.length;
+        libRaw = (data.items || []).slice();
+        pager.offset = libRaw.length;
         pager.more = true;
-        renderItems(data.items, '추천 영상이 없습니다');
+        applyLibView('추천 영상이 없습니다');
       } else {
-        renderItems([], '관련 영상을 불러오지 못했습니다');
+        libRaw = [];
+        applyLibView('관련 영상을 불러오지 못했습니다');
       }
     });
   }
@@ -2580,7 +2827,7 @@
       if (!playing) return;
       if (ended) {
         if (repeatAt > Date.now()) {
-          setStatus(Math.ceil((repeatAt - Date.now()) / 1000) + '초 뒤에 다시 재생합니다');
+          setStatus(Math.ceil((repeatAt - Date.now()) / 1000) + '초 뒤에 ' + (endMode === 'next' ? '다음 영상을 재생합니다' : '다시 재생합니다'));
         } else {
           setStatus('종료');
         }
@@ -3749,14 +3996,14 @@
       holdPlayback();
       applyStreamHold();
       if (na) { try { na.pause(); } catch (e) {} }
-      $('btnPause').textContent = '재생';
+      paintPlayButton();
       flashTap('▶');
       applyChrome();
       paintSeekBar();
       setStatus('일시정지 · 미리 받는 중');
     } else {
       paused = false;
-      $('btnPause').textContent = '일시정지';
+      paintPlayButton();
       flashTap('❚❚');
       applyChrome();
       // A healthy socket can resume in place. Rebuilding the stream on a
@@ -3791,6 +4038,19 @@
     }
   }
 
+  function paintPlayButton() {
+    var btn = $('btnPause');
+    if (!btn) return;
+    btn.classList.toggle('is-paused', !!paused);
+    btn.setAttribute('aria-label', paused ? '재생' : '일시정지');
+  }
+
+  function paintFsButton() {
+    var btn = $('btnFs');
+    if (!btn) return;
+    btn.setAttribute('aria-label', fsOn ? '전체화면 종료' : '전체화면');
+  }
+
   function applyChrome() {
     var box = $('playerBox');
     if (!box) return;
@@ -3803,8 +4063,15 @@
     if (controls) cls += ' controls-visible';
     box.className = cls;
     document.body.className = fsOn ? 'player-fs' : '';
-    if ($('btnFs')) $('btnFs').textContent = fsOn ? '전체화면 종료' : '전체화면';
+    paintFsButton();
     fitStage();
+    if (stickWatchTop) {
+      stickWatchTop = false;
+      scrollWatchTop();
+      setTimeout(scrollWatchTop, 0);
+      setTimeout(scrollWatchTop, 80);
+      setTimeout(scrollWatchTop, 320);
+    }
   }
 
   function applyInlineAr() {
@@ -3922,23 +4189,32 @@
     try { sessionStorage.setItem('tv_watch_back', JSON.stringify((list || []).slice(-20))); } catch (e) {}
   }
 
-  function goWatch(id, url) {
+  function goWatch(id, url, opts) {
+    opts = opts || {};
     saveBrowseState();
     rememberWatch(id, url);
+    var leavingFrom = watchFromFavs() ? 'favs' : '';
+    var destFavs = opts.keepFrom ? leavingFrom === 'favs' : currentFeed === 'favs';
+    if (destFavs) setWatchFrom('favs');
+    else setWatchFrom('');
     if (stage) {
       var curId = (watchItem && watchItem.id) || qsVal('v') || '';
       var curUrl = (watchItem && watchItem.url) || qsVal('url') || '';
       if ((curId && curId !== id) || (!curId && curUrl && curUrl !== url)) {
         var stack = readWatchBack();
         var top = stack.length ? stack[stack.length - 1] : null;
-        if (!top || top.id !== curId || (!curId && top.url !== curUrl)) stack.push({ id: curId, url: curUrl });
+        if (!top || top.id !== curId || (!curId && top.url !== curUrl)) stack.push({ id: curId, url: curUrl, from: leavingFrom });
         writeWatchBack(stack);
       }
     } else {
       writeWatchBack([]);
     }
-    if (id) location.href = tv.url('/watch/?v=' + encodeURIComponent(id));
-    else if (url) location.href = tv.url('/watch/?url=' + encodeURIComponent(url));
+    if (opts.auto) setAutoRunCount(opts.resetRun ? 1 : autoRunCount() + 1);
+    else setAutoRunCount(0);
+    hideAutoAsk();
+    var fromQ = destFavs ? '&from=favs' : '';
+    if (id) location.href = tv.url('/watch/?v=' + encodeURIComponent(id) + fromQ);
+    else if (url) location.href = tv.url('/watch/?url=' + encodeURIComponent(url) + fromQ);
   }
 
   function backWatch() {
@@ -3952,12 +4228,16 @@
     }
     writeWatchBack(stack);
     stop(false);
+    setAutoRunCount(0);
+    if (prev && prev.from === 'favs') setWatchFrom('favs');
+    else setWatchFrom('');
+    var fromQ = prev && prev.from === 'favs' ? '&from=favs' : '';
     if (prev && prev.id) {
-      location.replace(tv.url('/watch/?v=' + encodeURIComponent(prev.id)));
+      location.replace(tv.url('/watch/?v=' + encodeURIComponent(prev.id) + fromQ));
       return;
     }
     if (prev && prev.url) {
-      location.replace(tv.url('/watch/?url=' + encodeURIComponent(prev.url)));
+      location.replace(tv.url('/watch/?url=' + encodeURIComponent(prev.url) + fromQ));
       return;
     }
     location.href = tv.url('/player/');
@@ -4040,12 +4320,13 @@
     var url = playing || (watchItem && watchItem.url) || '';
     rememberWatch(id, url);
     unlockPlaybackAudio();
+    var fromQ = watchFromFavs() ? '&from=favs' : '';
     if (id) {
-      location.replace(tv.url('/watch/?v=' + encodeURIComponent(id) + '&r=' + Date.now()));
+      location.replace(tv.url('/watch/?v=' + encodeURIComponent(id) + fromQ + '&r=' + Date.now()));
       return;
     }
     if (url) {
-      location.replace(tv.url('/watch/?url=' + encodeURIComponent(url) + '&r=' + Date.now()));
+      location.replace(tv.url('/watch/?url=' + encodeURIComponent(url) + fromQ + '&r=' + Date.now()));
       return;
     }
     location.reload();
@@ -4059,7 +4340,7 @@
   };
   if ($('btnStop')) $('btnStop').onclick = function () { stop(false); setStatus('정지'); };
   if ($('btnPause')) $('btnPause').onclick = togglePause;
-  if ($('commentsPreview')) $('commentsPreview').onclick = openComments;
+  if ($('commentsPreview')) $('commentsPreview').onclick = toggleComments;
   if ($('commentsClose')) $('commentsClose').onclick = closeComments;
   var commentSortButtons = document.querySelectorAll('[data-comment-sort]');
   for (var csi = 0; csi < commentSortButtons.length; csi++) {
@@ -4073,14 +4354,34 @@
     repeatEnabled = !repeatEnabled;
     updateRepeatButton();
     if (repeatEnabled && ended) scheduleRepeatPlayback();
-    if (!repeatEnabled && repeatTimer) {
-      clearTimeout(repeatTimer);
-      repeatTimer = null;
-      repeatAt = 0;
-      if (ended) setStatus('종료');
+    if (!repeatEnabled && endMode === 'repeat') {
+      clearEndTimer();
+      if (autoplayNext && ended) scheduleNextPlayback();
+      else if (ended) setStatus('종료');
+    }
+  };
+  if ($('btnAutoplay')) $('btnAutoplay').onclick = function () {
+    autoplayNext = !autoplayNext;
+    autoplayLoaded = true;
+    paintAutoplayButton();
+    tv.post('/api/prefs', { autoplayNext: autoplayNext }, function (code, data) {
+      if (data && data.ok) {
+        autoplayNext = !!data.autoplayNext;
+        paintAutoplayButton();
+        return;
+      }
+      autoplayNext = !autoplayNext;
+      paintAutoplayButton();
+    });
+    if (!ended || repeatEnabled) return;
+    if (autoplayNext) scheduleNextPlayback();
+    else {
+      clearEndTimer();
+      setStatus('종료');
     }
   };
   updateRepeatButton();
+  paintAutoplayButton();
   if ($('btnFromStart')) $('btnFromStart').onclick = function () {
     if (!playing) return;
     playUrl(playing, 0, { skipInfo: true });
@@ -4288,6 +4589,7 @@
     }
     while (el && el !== list && !el.getAttribute('data-url') && !el.getAttribute('data-id')) el = el.parentNode;
     if (!el || el === list) return;
+    if (el.className && el.className.indexOf('is-playing') >= 0) return;
     goWatch(el.getAttribute('data-id'), el.getAttribute('data-url'));
   };
   }
@@ -4311,7 +4613,7 @@
         }
         return;
       }
-      if (currentFeed === 'favs') applyLibView();
+      if (currentFeed === 'favs' || currentFeed === 'related' || currentFeed === 'search') applyLibView();
     };
   }
   if ($('libVidFilter')) {
@@ -4328,7 +4630,7 @@
     for (var i = 0; i < btns.length; i++) {
       btns[i].className = 'chip' + (btns[i].getAttribute('data-sort') === s ? ' on' : '');
     }
-    if (currentFeed === 'favs' || currentFeed === 'subs') applyLibView();
+    if (currentFeed === 'favs' || currentFeed === 'subs' || currentFeed === 'related' || currentFeed === 'search') applyLibView();
   };
   function paintLogoutLabel() {
     var els = document.querySelectorAll('.js-logout');
@@ -4349,6 +4651,9 @@
       lastItems = [];
       selectedCh = '';
       currentPin = '';
+      autoplayNext = false;
+      autoplayLoaded = false;
+      paintAutoplayButton();
       paintLogoutLabel();
       loadFavMap();
       loadSubMap();
@@ -4387,7 +4692,7 @@
 
   function openWatchSearchTab() {
     setChip('search');
-    showLibTools(false);
+    showWatchFilters();
     showSubsRail(false);
     resetPager('search', { q: lastQuery || '' });
     if (!lastQuery) {
@@ -4399,9 +4704,9 @@
       return;
     }
     if (lastSearchItems && lastSearchItems.length) {
-      lastItems = lastSearchItems;
       lastChannels = lastSearchChannels;
-      renderItems(lastItems, '검색 결과 없음', lastChannels);
+      libRaw = lastSearchItems.slice();
+      applyLibView('검색 결과 없음');
       setStatus('"' + lastQuery + '" 검색 결과 ' + lastItems.length + '개');
       return;
     }
@@ -4410,7 +4715,7 @@
 
   function openWatchRelatedTab() {
     setChip('related');
-    showLibTools(false);
+    showWatchFilters();
     showSubsRail(false);
     showRelatedLoading();
     var id = (watchItem && watchItem.id) || qsVal('v') || (readWatch() && readWatch().v) || '';
@@ -4433,11 +4738,12 @@
     restoreCh = '';
     pendingScroll = 0;
     if (stage) {
+      if (feed !== currentFeed) resetLib();
       keepWatchScroll(function () {
         if (feed === 'related') openWatchRelatedTab();
         else if (feed === 'search') openWatchSearchTab();
         else if (feed === 'subs') loadSubs();
-        else if (feed === 'favs') loadFavs();
+        else if (feed === 'favs') showWatchFavs();
       });
       return;
     }
@@ -4464,13 +4770,16 @@
     tv.get('/api/auth/status', function (c, d) {
       currentPin = (d && d.pin) || '';
       paintLogoutLabel();
+      if (currentPin) loadAutoplayPref();
     });
     loadServerHistory();
     loadFavMap();
     loadSubMap();
     if (stage) {
+      if (qsVal('from') === 'favs') setWatchFrom('favs');
+      else if (qsVal('v') || qsVal('url')) setWatchFrom('');
       unlockAudio();
-      setChip('related');
+      setChip(watchFromFavs() ? 'favs' : 'related');
       var w = readWatch();
       if (w.v) playUrl('https://www.youtube.com/watch?v=' + w.v);
       else if (w.url) playUrl(w.url);
