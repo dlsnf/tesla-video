@@ -1276,15 +1276,53 @@ async function searchYoutubeWithChannels(query, limit, offset) {
   return { items: items, channels: channels };
 }
 
-function relatedQuery(title) {
-  var q = String(title || '');
-  q = q.replace(/\[[^\]]*\]/g, ' ');
-  q = q.replace(/\([^)]*\)/g, ' ');
-  q = q.replace(/official|lyrics?|audio|video|mv|m\/v|뮤직비디오|공식|풀버전|자막|hd|4k|live|라이브|직캠|fancam/gi, ' ');
-  q = q.replace(/[^\w\uac00-\ud7a3\s]/g, ' ');
-  q = q.replace(/\s+/g, ' ').trim();
-  if (!q) return String(title || '').trim();
-  return q.split(/\s+/).slice(0, 6).join(' ');
+function nextChannelVideos(channel, vid, prevId, currentTs) {
+  const rows = (channel || []).filter(function (it) { return it && it.id; });
+  var idx = -1;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].id === vid) { idx = i; break; }
+  }
+  var seq;
+  if (idx >= 0 && idx < rows.length - 1) seq = rows.slice(idx + 1);
+  else if (idx >= 0) seq = rows.slice(0, idx);
+  else if (currentTs > 0) {
+    seq = rows.filter(function (it) { return it.uploaded && it.uploaded < currentTs; });
+    seq.sort(function (a, b) { return (b.uploaded || 0) - (a.uploaded || 0); });
+    if (!seq.length) {
+      seq = rows.filter(function (it) { return it.id !== vid; });
+      seq.sort(function (a, b) { return (b.uploaded || 0) - (a.uploaded || 0); });
+    }
+  } else seq = rows.filter(function (it) { return it.id !== vid; });
+  return seq.filter(function (it) { return it.id !== vid && it.id !== prevId; });
+}
+
+async function channelVideosUntilCurrent(channelId, uploader, vid) {
+  const pageSize = 30;
+  const seen = {};
+  const all = [];
+  var found = !vid;
+  var extraPage = false;
+  for (var off = 0; off < 150; off += pageSize) {
+    var batch = [];
+    try { batch = await youtubeChannelVideos(channelId, pageSize, uploader, off); } catch (e) { break; }
+    if (!batch || !batch.length) break;
+    var added = 0;
+    for (var i = 0; i < batch.length; i++) {
+      var it = batch[i];
+      if (!it || !it.id || seen[it.id]) continue;
+      if (channelId && it.channel_id && it.channel_id !== channelId) continue;
+      seen[it.id] = true;
+      all.push(it);
+      added += 1;
+      if (vid && it.id === vid) found = true;
+    }
+    if (!added) break;
+    if (found) {
+      if (extraPage) break;
+      extraPage = true;
+    }
+  }
+  return all;
 }
 
 async function youtubeRelated(id, title, limit, extra) {
@@ -1294,33 +1332,14 @@ async function youtubeRelated(id, title, limit, extra) {
   const vid = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
   const channelId = String(extra.channel_id || '').replace(/[^a-zA-Z0-9_@-]/g, '');
   const uploader = String(extra.uploader || extra.channel || '').slice(0, 80);
-  const seen = {};
-  String(extra.exclude || '').split(',').forEach(function (x) {
-    const s = String(x || '').trim();
-    if (s) seen[s] = true;
-  });
-  if (vid) seen[vid] = true;
-  const out = [];
-  function addAll(arr) {
-    (arr || []).forEach(function (it) {
-      if (!it || !it.id || seen[it.id]) return;
-      seen[it.id] = true;
-      out.push(it);
-    });
+  const prevId = String(extra.prev || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  const currentTs = asMs(extra.uploaded);
+  let channel = [];
+  if (channelId || uploader) {
+    try { channel = await channelVideosUntilCurrent(channelId, uploader, vid); } catch (e) {}
   }
-  if (offset === 0) {
-    if (channelId || uploader) {
-      try { addAll(await youtubeChannelVideos(channelId, n + 2, uploader)); } catch (e) {}
-    }
-    return out.slice(0, n);
-  }
-  let titleQ = relatedQuery(title);
-  if (!titleQ) titleQ = uploader || '인기 급상승';
-  try { addAll(await searchYoutube(titleQ, n, Math.max(0, offset - n))); } catch (e) {}
-  if (out.length < n && uploader) {
-    try { addAll(await searchYoutube(uploader, n, offset)); } catch (e2) {}
-  }
-  return out.slice(0, n);
+  const seq = nextChannelVideos(channel, vid, prevId, currentTs);
+  return seq.slice(offset, offset + n);
 }
 
 async function youtubeComments(id, limit, offset, sort) {

@@ -26,7 +26,8 @@ fs.writeFileSync(
 );
 
 const sessions = new Map();
-const SESSION_TTL = 30 * 24 * 3600 * 1000;
+const SESSION_TTL = 24 * 3600 * 1000;
+const SESSION_COOKIE_AGE = 24 * 3600;
 const SESSION_FILE = path.join(config.DATA_DIR, 'sessions.json');
 const healthCache = { ts: 0, value: null, pending: null };
 const HEALTH_TTL = 30000;
@@ -69,22 +70,74 @@ function queryToken(req) {
   }
 }
 
-function sessionOf(req) {
+function sessionToken(req) {
   const cookies = parseCookies(req.headers.cookie);
-  const token = cookies.tv_session || cookies.tv_token || queryToken(req) || req.headers['x-tv-token'];
-  if (!token) return null;
+  return cookies.tv_session || cookies.tv_token || queryToken(req) || req.headers['x-tv-token'] || '';
+}
+
+let sessionSaveTimer = null;
+function scheduleSaveSessions() {
+  if (sessionSaveTimer) return;
+  sessionSaveTimer = setTimeout(function () {
+    sessionSaveTimer = null;
+    saveSessions();
+  }, 5000);
+  if (sessionSaveTimer.unref) sessionSaveTimer.unref();
+}
+
+function flushSessions() {
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+  }
+  saveSessions();
+}
+
+// Activity, including an open playback socket, moves the 24h window forward.
+// A quiet day still ends the session on the next request.
+function touchSession(token) {
+  if (!token) return false;
   const rec = sessions.get(token);
-  if (!rec) return null;
+  if (!rec) return false;
   const ts = typeof rec === 'number' ? rec : rec.ts;
-  if (Date.now() - ts > SESSION_TTL) {
+  if (!(ts > 0) || Date.now() - ts > SESSION_TTL) {
     sessions.delete(token);
-    return null;
+    scheduleSaveSessions();
+    return false;
   }
   if (typeof rec !== 'number' && rec.pin && !favorites.validPin(rec.pin)) {
     sessions.delete(token);
-    return null;
+    scheduleSaveSessions();
+    return false;
   }
+  const now = Date.now();
+  if (typeof rec === 'number') sessions.set(token, { pin: '', ts: now });
+  else rec.ts = now;
+  scheduleSaveSessions();
+  return true;
+}
+
+function sessionOf(req) {
+  const token = sessionToken(req);
+  if (!token || !touchSession(token)) return null;
+  const rec = sessions.get(token);
   return typeof rec === 'number' ? { pin: '', ts: rec } : rec;
+}
+
+function keepSessionAlive(req, ws) {
+  const token = sessionToken(req);
+  if (!token) return;
+  const timer = setInterval(function () {
+    if (!ws || ws.readyState !== 1) return;
+    if (!touchSession(token)) {
+      try { ws.close(); } catch (e) {}
+    }
+  }, 60 * 1000);
+  if (timer.unref) timer.unref();
+  ws.on('close', function () {
+    clearInterval(timer);
+    touchSession(token);
+  });
 }
 
 function isAuthed(req) {
@@ -213,8 +266,8 @@ app.post('/api/auth/login', function (req, res) {
   sessions.set(token, { pin: pin, ts: Date.now() });
   saveSessions();
   res.setHeader('Set-Cookie', [
-    'tv_session=' + token + '; Path=/; Max-Age=2592000; SameSite=Lax',
-    'tv_token=' + token + '; Path=/; Max-Age=2592000; SameSite=Lax'
+    'tv_session=' + token + '; Path=/; Max-Age=' + SESSION_COOKIE_AGE + '; SameSite=Lax',
+    'tv_token=' + token + '; Path=/; Max-Age=' + SESSION_COOKIE_AGE + '; SameSite=Lax'
   ]);
   res.json({ ok: true, token: token, pin: pin });
 });
@@ -557,6 +610,8 @@ app.get('/api/youtube/related', async function (req, res) {
       uploader: req.query.uploader || req.query.channel || '',
       offset: req.query.offset || 0,
       exclude: req.query.exclude || '',
+      prev: req.query.prev || '',
+      uploaded: req.query.uploaded || 0,
     });
     const n = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
     res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(n, 8)) });
@@ -752,10 +807,12 @@ wss.on('connection', function (ws, req, parsed) {
     return;
   }
   stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, format: format, refresh: refresh, legacySeek: legacySeek });
+  keepSessionAlive(req, ws);
 });
 
 function shutdown() {
   console.log('shutting down');
+  flushSessions();
   server.close(function () { process.exit(0); });
   setTimeout(function () { process.exit(0); }, 3000);
 }
