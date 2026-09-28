@@ -114,6 +114,13 @@
       autoplayLoaded = true;
       autoplayNext = !!(d && d.ok && d.autoplayNext);
       paintAutoplayButton();
+      if (!volTouched && d && d.ok && d.volume != null && d.volume !== '') {
+        var pct = parseInt(d.volume, 10);
+        if (pct === pct) {
+          if (pct > 0) lastVol = pct;
+          setVol(pct, { quiet: true });
+        }
+      }
     });
   }
   var audioMediaCursor = 0;
@@ -4422,19 +4429,32 @@
   });
   if ($('btnFs')) $('btnFs').onclick = function (e) { if (e) e.stopPropagation(); setFs(!fsOn); };
   var lastVol = 100;
-  function setVol(pct) {
+  var volTouched = false;
+  var volSaveTimer = 0;
+  function saveVolumePref(pct) {
+    if (!currentPin) return;
+    if (volSaveTimer) clearTimeout(volSaveTimer);
+    volSaveTimer = setTimeout(function () {
+      volSaveTimer = 0;
+      tv.post('/api/prefs', { volume: pct }, function () {});
+    }, 300);
+  }
+  function setVol(pct, opts) {
     pct = Math.max(0, Math.min(100, pct));
     if ($('vol')) $('vol').value = String(pct);
     var v = pct / 100;
     applyPlayerVol();
     if (na) { na.volume = v; na.muted = pct <= 0; }
     if ($('btnMute')) $('btnMute').textContent = pct <= 0 ? '✕' : '♪';
+    if (!opts || !opts.quiet) saveVolumePref(pct);
   }
   if ($('vol')) $('vol').oninput = function () {
+    volTouched = true;
     lastVol = parseInt(this.value, 10) || 0;
     setVol(lastVol);
   };
   if ($('btnMute')) $('btnMute').onclick = function () {
+    volTouched = true;
     var cur = parseInt(($('vol') && $('vol').value) || '100', 10);
     if (cur > 0) { lastVol = cur; setVol(0); }
     else setVol(lastVol || 100);
