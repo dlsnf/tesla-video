@@ -1094,6 +1094,8 @@
       items.sort(function (a, b) { return (b.views || 0) - (a.views || 0); });
     } else if (libSort === 'dur') {
       items.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
+    } else if (currentFeed === 'favs' && (libSort === 'old' || libSort === 'new')) {
+      items = sortFavsBySaved(items, libSort);
     } else if (libSort === 'old' || libSort === 'new') {
       if (hasSortTime(items)) {
         var indexed = items.map(function (it, i) { return { it: it, i: i }; });
@@ -1125,6 +1127,31 @@
     var midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
     var noon = d.getUTCHours() === 12 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
     return midnight || noon;
+  }
+
+  function favSavedAt(it) {
+    return parseInt(it && it.saved, 10) || 0;
+  }
+
+  function sortFavsBySaved(items, mode) {
+    var indexed = [];
+    var hasSaved = false;
+    for (var i = 0; i < items.length; i++) {
+      indexed.push({ it: items[i], i: i });
+      if (favSavedAt(items[i])) hasSaved = true;
+    }
+    if (hasSaved) {
+      indexed.sort(function (a, b) {
+        var d = favSavedAt(a.it) - favSavedAt(b.it);
+        if (mode === 'new') d = -d;
+        return d || (a.i - b.i);
+      });
+    } else if (mode === 'old') {
+      indexed.reverse();
+    }
+    var out = [];
+    for (var j = 0; j < indexed.length; j++) out.push(indexed[j].it);
+    return out;
   }
 
   function sortTime(it) {
@@ -2223,10 +2250,7 @@
     for (var i = 0; i < (items || []).length; i++) {
       if (items[i] && items[i].id) rows.push(items[i]);
     }
-    if (rows.some(function (it) { return it.ts; })) {
-      rows.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
-    }
-    return rows;
+    return sortFavsBySaved(rows, 'new');
   }
 
   function nextPlayableItem(rows, currentId) {

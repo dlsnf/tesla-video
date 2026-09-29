@@ -366,10 +366,21 @@ app.get('/api/favorites', async function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
   const items = favorites.read(pin);
+  const savedAt = {};
+  for (var i = 0; i < items.length; i++) {
+    if (items[i] && items[i].id) savedAt[items[i].id] = parseInt(items[i].ts, 10) || 0;
+  }
   try {
     await media.fillItemStats(items);
     favorites.rememberStats(pin, items);
   } catch (e) {}
+  for (var j = 0; j < items.length; j++) {
+    if (!items[j] || !items[j].id) continue;
+    var saved = savedAt[items[j].id] || 0;
+    if (!saved) continue;
+    items[j].saved = saved;
+    items[j].ts = saved;
+  }
   res.json({ ok: true, pin: pin, items: items });
 });
 
