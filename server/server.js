@@ -739,6 +739,9 @@ app.get('/api/media/info', async function (req, res) {
       width: info.width || 854,
       height: info.height || 480,
       aspect: info.aspect || (16 / 9),
+      views: info.views || 0,
+      uploaded: info.uploaded || 0,
+      comments: info.comments == null ? null : info.comments,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180) });

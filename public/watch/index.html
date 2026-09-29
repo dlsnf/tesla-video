@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=152">
+<link rel="stylesheet" href="../css/app.css?v=156">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -124,6 +124,7 @@
 
   <div class="stat" id="st">영상을 불러오는 중...</div>
   <h1 class="watch-title" id="watchH">재생</h1>
+  <p class="watch-meta" id="watchMeta"></p>
   <table class="ch-row" id="chRow" style="display:none">
     <tr>
       <td class="ch-av-td"><div class="ch-av" id="chAv"></div></td>
@@ -204,9 +205,26 @@
   </div>
 </div>
 
+<script>
+(function () {
+  var q = String(location.search || '');
+  if (!/(?:^|[?&])m=1(?:&|$)/.test(q)) return;
+  var st = document.getElementById('st');
+  if (st) { st.textContent = '회원전용 영상입니다'; st.className = 'stat members'; }
+  var ss = document.getElementById('stageStatus');
+  if (ss) { ss.textContent = '회원전용 영상입니다'; ss.className = 'stage-status on members'; }
+  var np = document.getElementById('npTitle');
+  if (np) np.textContent = '회원전용 영상입니다';
+  var curtain = document.getElementById('loadingCurtain');
+  if (curtain) curtain.className = 'loading-curtain';
+  var bg = document.getElementById('stageLoadingBg');
+  if (bg) bg.className = 'stage-loading-bg';
+  document.body.className = String(document.body.className || '').replace(/\bwatch-loading\b/, '').replace(/^\s+|\s+$/g, '');
+})();
+</script>
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=134"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=239"></script>
+  <script src="../js/player.js?v=248"></script>
 </body>
 </html>
