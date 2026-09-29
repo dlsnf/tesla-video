@@ -25,6 +25,13 @@ setInterval(function () {
   });
 }, 60 * 1000).unref();
 
+function isMembersOnly(dumpJson, err) {
+  const availability = String((dumpJson && dumpJson.availability) || '');
+  const msg = String((err && err.message) || '');
+  return /subscriber_only|premium_only|needs_auth/i.test(availability)
+    || /members[- ]only|channel'?s members|Join this channel|회원 전용/i.test(msg);
+}
+
 function isBotBlock(err) {
   return /봇이 아님|not a bot|Sign in to confirm|페이지를 새로고침해야|page needs to be reloaded|Requested format is not available|사용 가능한 형식|HTTP error 403 Forbidden|403 Forbidden/i.test(String((err && err.message) || err || ''));
 }
@@ -75,9 +82,11 @@ async function ytdlpRun(extra, opts) {
       }), { timeout: timeout });
     } catch (e) {
       last = e;
+      if (opts.cookies === true) continue;
       if (!isBotBlock(e)) throw e;
     }
   }
+  if (opts.cookies === true) throw last || new Error('no stream url');
   throw Object.assign(new Error(botHint()), last || {});
 }
 
@@ -339,11 +348,12 @@ async function resolveSource(input, quality) {
   const cached = cacheGet(resolveCache, key, RESOLVE_TTL);
   // Older cache entries were created before the requested source height was
   // recorded and may pin a new playback to a 360p direct URL. Refresh once.
-  if (cached && cached.sourceHeight != null) return cached;
+  // Entries from before comment counts were stored are refreshed the same way.
+  if (cached && cached.sourceHeight != null && Object.prototype.hasOwnProperty.call(cached, 'comments')) return cached;
   if (cached) resolveCache.delete(key);
 
   const format = formatForQuality(q);
-  const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s';
+  const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s|||%(comment_count)s';
   let dumpJson = null;
   let dump = null;
   const candidateFormats = youtubeFormatCandidatesForQuality(q);
@@ -358,8 +368,10 @@ async function resolveSource(input, quality) {
       dump = pickDumpUrls(dumpJson);
       if (dump && dump.video && dump.video.url) break;
       lastMetaError = new Error('no stream url');
+      if (isMembersOnly(dumpJson, null)) break;
     } catch (e) {
       lastMetaError = e;
+      if (isMembersOnly(dumpJson, e)) break;
       if (!isBotBlock(e)) {
         if (i === candidateFormats.length - 1) break;
         continue;
@@ -368,6 +380,14 @@ async function resolveSource(input, quality) {
     }
   }
   if (!dump || !dump.video || !dump.video.url) {
+    var membersHit = isMembersOnly(dumpJson, lastMetaError);
+    if (!membersHit && classified.type === 'youtube') {
+      try {
+        var memberStat = await videoStat(classified.id);
+        if (memberStat && memberStat.members) membersHit = true;
+      } catch (e) {}
+    }
+    if (membersHit) throw new Error('회원전용 영상입니다');
     dump = null;
     if (lastMetaError && !isBotBlock(lastMetaError)) {
       throw lastMetaError;
@@ -392,6 +412,7 @@ async function resolveSource(input, quality) {
       avatar: d.uploader_avatar_url || d.thumbnail || '',
       views: parseInt(d.view_count, 10) || 0,
       uploaded: asMs(d.timestamp) || parseUploadDate(d.upload_date),
+      comments: countField(d.comment_count),
       thumbnail: d.thumbnail || (classified.type === 'youtube' ? ('https://i.ytimg.com/vi/' + classified.id + '/mqdefault.jpg') : ''),
       pageUrl: classified.pageUrl,
       videoUrl: vf.url,
@@ -444,6 +465,7 @@ async function resolveSource(input, quality) {
       avatar: (parts[10] && parts[10] !== 'NA') ? parts[10] : '',
       views: parseInt(parts[12], 10) || 0,
       uploaded: asMs(parts[11]) || parseUploadDate(parts[13]),
+      comments: countField(parts[14]),
       thumbnail: parts[5] || (classified.type === 'youtube' ? ('https://i.ytimg.com/vi/' + classified.id + '/mqdefault.jpg') : ''),
       pageUrl: classified.pageUrl,
       videoUrl: urls[0],
@@ -521,6 +543,29 @@ function asMs(v) {
   if (n <= 0) return 0;
   if (n < 1e12) n *= 1000;
   return n;
+}
+
+function isCoarseTime(ms) {
+  ms = asMs(ms);
+  if (!(ms > 0)) return true;
+  const d = new Date(ms);
+  const midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
+  const noon = d.getUTCHours() === 12 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0;
+  return midnight || noon;
+}
+
+function betterTime(current, next) {
+  if (!(next > 0)) return current || 0;
+  if (!(current > 0)) return next;
+  if (isCoarseTime(current) && !isCoarseTime(next)) return next;
+  if (!isCoarseTime(next)) return next;
+  return current;
+}
+
+function countField(v) {
+  if (v == null || v === '' || v === 'NA' || v === 'None') return null;
+  const n = parseInt(v, 10);
+  return isFinite(n) && n >= 0 ? n : null;
 }
 
 function parsePrintItems(stdout) {
@@ -827,6 +872,12 @@ function walkRenderers(node, acc, depth) {
   return acc;
 }
 
+function hasMembersBadge(node) {
+  return !!findNestedString(node, function (s) {
+    return s === 'BADGE_MEMBERS_ONLY' || s === '회원 전용' || s === '회원 우선 공개' || s === '회원전용';
+  }, 0);
+}
+
 function mapInnertubeVideo(v) {
   if (!v) return null;
   const id = v.videoId || (((v.navigationEndpoint || {}).watchEndpoint) || {}).videoId || '';
@@ -862,6 +913,7 @@ function mapInnertubeVideo(v) {
     published: published,
     thumbnail: 'https://i.ytimg.com/vi/' + id + '/mqdefault.jpg',
     url: 'https://www.youtube.com/watch?v=' + id,
+    members: hasMembersBadge(v) ? true : undefined,
   };
 }
 
@@ -941,6 +993,7 @@ function mapLockupVideo(v) {
     published: published,
     thumbnail: 'https://i.ytimg.com/vi/' + id + '/mqdefault.jpg',
     url: 'https://www.youtube.com/watch?v=' + id,
+    members: hasMembersBadge(v) ? true : undefined,
   };
 }
 
@@ -1349,7 +1402,7 @@ async function channelNewest(channelId, offset, limit, excludeId) {
 async function videoStat(id) {
   const key = 'vstat|' + id;
   const hit = cacheGet(searchCache, key, 6 * 60 * 60 * 1000);
-  if (hit) return hit;
+  if (hit && Object.prototype.hasOwnProperty.call(hit, 'members')) return hit;
   const json = await httpsJson('www.youtube.com', '/youtubei/v1/player?prettyPrint=false', {
     context: innertubeContext(),
     videoId: id,
@@ -1359,8 +1412,10 @@ async function videoStat(id) {
   const views = parseInt(((json.videoDetails || {}).viewCount), 10) || 0;
   const micro = ((json.microformat || {}).playerMicroformatRenderer) || {};
   const uploaded = Date.parse(micro.publishDate || micro.uploadDate || '') || 0;
-  const stat = { views: views, uploaded: uploaded > 0 ? uploaded : 0 };
-  if (stat.views || stat.uploaded) cacheSet(searchCache, key, stat);
+  const reason = String(((json.playabilityStatus || {}).reason) || '');
+  const members = /채널 회원|회원 전용|회원 우선|회원전용|members only|members-only|channel members/i.test(reason);
+  const stat = { views: views, uploaded: uploaded > 0 ? uploaded : 0, members: members };
+  cacheSet(searchCache, key, stat);
   return stat;
 }
 
@@ -1368,9 +1423,18 @@ async function fillItemStats(items) {
   const list = items || [];
   const missing = [];
   const seen = {};
+  const ties = {};
+  list.forEach(function (it) {
+    const t = parseInt(it && (it.uploaded || it.ts), 10) || 0;
+    if (t) ties[t] = (ties[t] || 0) + 1;
+  });
   list.forEach(function (it) {
     if (!it || !it.id || seen[it.id]) return;
-    if ((parseInt(it.views, 10) || 0) > 0 && (parseInt(it.uploaded, 10) || 0) > 0) return;
+    const t = parseInt(it.uploaded, 10) || parseInt(it.ts, 10) || 0;
+    const viewsOk = (parseInt(it.views, 10) || 0) > 0;
+    const timeOk = t > 0 && !isCoarseTime(t) && !(ties[t] > 1);
+    const membersKnown = it.members === true || it.members === false;
+    if (viewsOk && timeOk && membersKnown) return;
     seen[it.id] = true;
     missing.push(it.id);
   });
@@ -1391,7 +1455,14 @@ async function fillItemStats(items) {
     const st = it && found[it.id];
     if (!st) return;
     if (!((parseInt(it.views, 10) || 0) > 0) && st.views > 0) it.views = st.views;
-    if (!((parseInt(it.uploaded, 10) || 0) > 0) && st.uploaded > 0) it.uploaded = st.uploaded;
+    const currentTime = parseInt(it.uploaded, 10) || parseInt(it.ts, 10) || 0;
+    const nextTime = betterTime(currentTime, st.uploaded);
+    if (nextTime > 0 && (nextTime !== currentTime || !(parseInt(it.uploaded, 10) > 0))) {
+      it.uploaded = nextTime;
+      it.ts = nextTime;
+    }
+    if (st.members === true) it.members = true;
+    else if (st.members === false) it.members = false;
   });
   return list;
 }
@@ -1433,6 +1504,69 @@ async function channelVideosUntilCurrent(channelId, uploader, vid, needAfter) {
   return all;
 }
 
+function firstPlayable(rows) {
+  const list = rows || [];
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i] || !list[i].id || list[i].members === true) continue;
+    return list[i];
+  }
+  return null;
+}
+
+async function nextAutoplayVideo(channelId, vid, currentTs) {
+  if (!channelId) return [];
+  const url = channelPageUrl(channelId);
+  if (!url) return [];
+  const seen = {};
+  const before = [];
+  var found = false;
+  var checked = 0;
+  const maxCheck = 40;
+  var feedEnded = false;
+  for (var off = 0; off < 240 && checked < maxCheck && !feedEnded; off += 30) {
+    var page = [];
+    try { page = await cachedChannelFeed(url, 30, off); } catch (e) { feedEnded = true; break; }
+    if (!page || !page.length) { feedEnded = true; break; }
+    var added = 0;
+    var after = [];
+    for (var i = 0; i < page.length; i++) {
+      var it = page[i];
+      if (!it || !it.id || seen[it.id]) continue;
+      if (it.channel_id && it.channel_id !== channelId) continue;
+      seen[it.id] = true;
+      added += 1;
+      if (!found) {
+        if (it.id === vid) found = true;
+        else before.push(it);
+        continue;
+      }
+      after.push(it);
+    }
+    if (!added) { feedEnded = true; break; }
+    if (!found || !after.length) continue;
+    var slice = after.slice(0, maxCheck - checked);
+    checked += slice.length;
+    for (var s = 0; s < slice.length; ) {
+      var group = slice.slice(s, s + 4);
+      s += group.length;
+      try { await fillItemStats(group); } catch (e2) {}
+      var hit = firstPlayable(group);
+      if (hit) return [hit];
+    }
+  }
+  if (!found) {
+    const seq = nextChannelVideos(before, vid, currentTs).slice(0, 12);
+    try { await fillItemStats(seq); } catch (e3) {}
+    var missed = firstPlayable(seq);
+    return missed ? [missed] : [];
+  }
+  if (!feedEnded || !before.length) return [];
+  var wrap = before.slice(0, 12);
+  try { await fillItemStats(wrap); } catch (e4) {}
+  var wrapped = firstPlayable(wrap);
+  return wrapped ? [wrapped] : [];
+}
+
 async function youtubeRelated(id, title, limit, extra) {
   extra = extra || {};
   const n = Math.min(Math.max(parseInt(limit, 10) || 8, 1), 24);
@@ -1442,11 +1576,7 @@ async function youtubeRelated(id, title, limit, extra) {
   const uploader = String(extra.uploader || extra.channel || '').slice(0, 80);
   const currentTs = asMs(extra.uploaded);
   if (String(extra.pick || '') === 'next') {
-    let channel = [];
-    if (channelId) {
-      try { channel = await channelVideosUntilCurrent(channelId, uploader, vid, 1); } catch (e) {}
-    }
-    return nextChannelVideos(channel, vid, currentTs).slice(0, n);
+    return nextAutoplayVideo(channelId, vid, currentTs);
   }
   if (!channelId) return [];
   try { return await channelNewest(channelId, offset, n, ''); } catch (e) { return []; }
@@ -1582,11 +1712,14 @@ async function youtubeChannelVideos(channelId, limit, name, offset, opts) {
   const n = Math.min(Math.max(parseInt(limit, 10) || 4, 1), 40);
   const off = Math.max(0, parseInt(offset, 10) || 0);
   let url = channelPageUrl(channelId);
-  const key = 'ch|' + off + '|' + n + '|' + (url || ('q:' + (name || channelId || '')));
+  const key = 'ch3|' + off + '|' + n + '|' + (url || ('q:' + (name || channelId || '')));
   const cached = cacheGet(searchCache, key, 10 * 60 * 1000);
   if (cached) return cached;
   let items = [];
-  if (!off && String(channelId || '').indexOf('UC') === 0) {
+  if (String(channelId || '').indexOf('UC') === 0) {
+    try { items = await channelNewest(channelId, off, n, ''); } catch (e) { items = []; }
+  }
+  if ((!items || !items.length) && !off && String(channelId || '').indexOf('UC') === 0) {
     try { items = await innertubeChannelVideos(channelId, n); } catch (e) { items = []; }
   }
   if ((!items || !items.length) && url) {

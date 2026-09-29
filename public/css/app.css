@@ -255,6 +255,10 @@ body.watch-loading { background: #000; }
   pointer-events: none;
 }
 .stage-status.on { display: block; }
+.stage-status.members,
+.stat.members,
+.members-only { color: #3ddc84; font-weight: 700; }
+.members-only { font-size: 12px; line-height: 18px; margin-top: 2px; }
 .stage-loader {
   display: none; position: absolute; left: 50%; top: 50%; z-index: 7;
   width: 34px; height: 34px; transform: translate(-50%, -50%);
@@ -491,7 +495,7 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
   font-weight: 500;
 }
 .yt-hint { color: var(--muted); font-size: 0.78rem; margin-left: 8px; vertical-align: middle; }
-.chips { margin: 0 0 18px; padding-bottom: 2px; }
+.chips { margin: 0 0 18px; padding-bottom: 2px; margin-top:60px;}
 .watch-tab-search { margin: -6px 0 16px; overflow: hidden; padding-top: 2px; max-width: 640px; }
 .chip {
   display: inline-block; min-width: 48px; height: 40px; line-height: 40px; padding: 0 14px; margin: 0 8px 8px 0;
@@ -505,6 +509,8 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
   cursor: pointer;
 }
 .yt-card:nth-child(3n) { margin-right: 0; }
+.yt-grid > .ch-hits ~ .yt-card:nth-child(3n) { margin-right: 2%; }
+.yt-grid > .ch-hits ~ .yt-card:nth-child(3n + 1) { margin-right: 0; }
 .yt-card:active { opacity: 0.9; }
 .yt-card.is-playing,
 .yt-card.is-playing:active { cursor: default; opacity: 1; }
@@ -593,9 +599,16 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
   font-size: 1.25rem;
   font-weight: 700;
   line-height: 1.4;
-  margin: 8px 0 6px;
+  margin: 8px 0 4px;
   color: #f1f1f1;
 }
+.watch-meta {
+  margin: 0 0 12px;
+  color: #aaa;
+  font-size: 13px;
+  line-height: 18px;
+}
+.watch-meta:empty { display: none; }
 .star-btn {
   width: 40px; height: 40px; padding: 4px; border: 0; border-radius: 20px;
   background: rgba(0,0,0,.45); cursor: pointer; line-height: 0;
@@ -705,6 +718,15 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
 .lib-tools { margin: 0 0 12px; }
 .lib-tools .inp { width: 100%; flex: none; display: block; margin-bottom: 8px; }
 .lib-sorts { margin: 0; }
+.lib-sorts .chip {
+  background: #1a3348;
+  color: #d7ecff;
+}
+.lib-sorts .chip.on {
+  background: #3ea6ff;
+  color: #0f0f0f;
+  border-color: #3ea6ff;
+}
 .feed-split { width: 100%; border-collapse: collapse; table-layout: auto; }
 .subs-td { width: 228px; vertical-align: top; padding: 0 16px 0 0; }
 .feed-td { width: 99%; vertical-align: top; }
@@ -807,7 +829,7 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
 }
 body.player-fs { overflow: hidden; }
 body.player-fs .yt-head, body.player-fs .yt-top, body.player-fs .chips, body.player-fs .yt-grid, body.player-fs .stat,
-body.player-fs .watch-head, body.player-fs .watch-search, body.player-fs .watch-tab-search, body.player-fs .watch-title, body.player-fs .rel-h,
+body.player-fs .watch-head, body.player-fs .watch-search, body.player-fs .watch-tab-search, body.player-fs .watch-title, body.player-fs .watch-meta, body.player-fs .rel-h,
 body.player-fs .ch-row, body.player-fs .ch-hits, body.player-fs .lib-tools, body.player-fs .feed-split,
 body.player-fs .more-bar { display: none; }
 .tap-layer { position: absolute; top: 0; right: 0; left: 0; bottom: 0; z-index: 5; touch-action: none; }
