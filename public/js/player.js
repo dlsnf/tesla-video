@@ -75,6 +75,9 @@
   var pendingEarlyContinue = false;
   var forceShortFinish = false;
   var repeatEnabled = false;
+  var repeatRunCount = 0;
+  var repeatAskOpen = false;
+  var repeatHeld = false;
   var autoplayNext = false;
   var autoplayLoaded = false;
   var endMode = '';
@@ -155,7 +158,12 @@
   var videoCatching = false;
   var audioStarvedSince = 0;
   var videoStartWall = 0;
-  var fsOn = false, fsAlign = 'top', tapHide = null, fsControlsTimer = null;
+  var fsOn = false, fsAlign = 'top', tapHide = null, chromeTimer = null;
+  var keepFsOnBoot = false;
+  try {
+    keepFsOnBoot = sessionStorage.getItem('tv_fs_keep') === '1';
+    if (keepFsOnBoot) sessionStorage.removeItem('tv_fs_keep');
+  } catch (eKeepFs) {}
   var soundUnlockBound = false, soundResyncing = false, wantSoundHint = false;
   var currentFeed = 'home';
   var videoAr = 16 / 9;
@@ -436,11 +444,21 @@
       stageRepeat.className = repeatMatch ? 'stage-repeat on' : 'stage-repeat';
       if (repeatMatch && stageRepeatCount) stageRepeatCount.textContent = repeatMatch[1];
     }
+    syncCenterIconCover();
     showBotHelp(isBotErr(t));
     if (playbackDebug && t !== lastDebugStatus) {
       lastDebugStatus = t;
       console.log('[tesla-video status]', t);
     }
+  }
+
+  function syncCenterIconCover() {
+    var icon = $('tapIcon');
+    if (!icon || !icon.classList) return;
+    var loader = $('stageLoader');
+    var repeat = $('stageRepeat');
+    var busy = (loader && loader.classList.contains('on')) || (repeat && repeat.classList.contains('on'));
+    icon.classList.toggle('is-covered', !!busy);
   }
 
   function updateStageLoader(status) {
@@ -449,6 +467,7 @@
     var loading = /지정한 위치로 이동 중|불러오는 중/.test(String(status || ''));
     var waitingForPlayback = !!player && (!stageFrameReady || !stagePrerollReady);
     stageLoader.className = loading || waitingForPlayback ? 'stage-loader on' : 'stage-loader';
+    syncCenterIconCover();
   }
 
   function debugPlayback(label, extra) {
@@ -2032,6 +2051,7 @@
     holdPlayback();
     paintPlayButton();
     applyChrome();
+    showChromeOverlay();
     paintSeekBar();
     setStatus('종료');
     if (repeatEnabled) scheduleRepeatPlayback();
@@ -2048,10 +2068,23 @@
     nextToken += 1;
   }
 
+  function beginRepeatRestart(src) {
+    preservedStageFrame = '';
+    if (stage) {
+      try { stage.width = stage.width; } catch (eClear) {}
+    }
+    debugPlayback('repeat-restart', { requestedStart: 0, lastPosition: lastPlaybackPos });
+    playUrl(src, 0, { skipInfo: false, repeat: true });
+  }
+
   function scheduleRepeatPlayback() {
     if (!repeatEnabled || !playing || isLive) return;
     clearEndTimer();
     endMode = 'repeat';
+    if (repeatRunCount >= 10) {
+      showRepeatAsk();
+      return;
+    }
     var src = playing;
     repeatAt = Date.now() + 3000;
     setStatus('3초 뒤에 다시 재생합니다');
@@ -2059,14 +2092,8 @@
       repeatTimer = null;
       repeatAt = 0;
       if (!repeatEnabled || !src || playing !== src || !ended) return;
-      // A repeat is always a new stream from zero. Clear the retained canvas
-      // frame too, so a late first frame cannot look like a mid-video restart.
-      preservedStageFrame = '';
-      if (stage) {
-        try { stage.width = stage.width; } catch (eClear) {}
-      }
-      debugPlayback('repeat-restart', { requestedStart: 0, lastPosition: lastPlaybackPos });
-      playUrl(src, 0, { skipInfo: false, repeat: true });
+      repeatRunCount += 1;
+      beginRepeatRestart(src);
     }, 3000);
   }
 
@@ -2153,6 +2180,43 @@
     }
     el.className = 'auto-ask on';
     setStatus('다음 영상을 재생할까요?');
+  }
+
+  function hideRepeatAsk() {
+    repeatAskOpen = false;
+    var el = $('repeatAsk');
+    if (el) el.className = 'auto-ask';
+  }
+
+  function showRepeatAsk() {
+    repeatHeld = false;
+    repeatAskOpen = true;
+    var el = $('repeatAsk');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'repeatAsk';
+      el.className = 'auto-ask';
+      el.innerHTML = '<div class="auto-ask-box"><h2>계속 반복 재생할까요?</h2><p>이 영상을 10번 반복 재생했습니다.</p><div class="auto-ask-actions"><button type="button" class="btn btn-gray" id="repeatAskNo">취소</button><button type="button" class="btn btn-red" id="repeatAskYes">계속 재생</button></div></div>';
+      document.body.appendChild(el);
+      $('repeatAskYes').onclick = function () {
+        var src = playing;
+        hideRepeatAsk();
+        repeatHeld = false;
+        repeatRunCount = 1;
+        if (!repeatEnabled || !src) { setStatus('일시정지'); return; }
+        beginRepeatRestart(src);
+        showChromeOverlay();
+      };
+      $('repeatAskNo').onclick = function () {
+        hideRepeatAsk();
+        repeatHeld = true;
+        setStatus('일시정지');
+        showChromeOverlay();
+      };
+    }
+    el.className = 'auto-ask on';
+    setStatus('계속 반복 재생할까요?');
+    showChromeOverlay();
   }
 
   function startNextVideo(confirmed) {
@@ -2500,6 +2564,12 @@
   function playUrl(src, seek, opts) {
     opts = opts || {};
     var useLegacy = !!opts.legacy;
+    var sameSrc = playing === src;
+    if (!opts.repeat) hideRepeatAsk();
+    if (!sameSrc && !opts.repeat) {
+      repeatRunCount = 0;
+      repeatHeld = false;
+    }
     if (!opts.recovery) prerollRecoveryCount = 0;
     var playSeq = beginReq();
     var keepPaused = !!opts.keepPaused;
@@ -2529,7 +2599,18 @@
       pausePos = -1;
     }
     paintPlayButton();
+    var bootFs = false;
+    if (keepFsOnBoot) {
+      keepFsOnBoot = false;
+      fsOn = true;
+      bootFs = true;
+    }
     applyChrome();
+    if (bootFs) {
+      setTimeout(fitStage, 0);
+      setTimeout(fitStage, 80);
+    }
+    syncChromeAfterPlay();
     $('npFps').textContent = outHeight() + 'p · ' + fps + 'fps · 0 FPS';
     if (skipInfo) {
       paintSeekBar();
@@ -2833,6 +2914,15 @@
     tickTimer = setInterval(function () {
       if (!playing) return;
       if (ended) {
+        if (repeatAskOpen) {
+          paintSeekBar();
+          return;
+        }
+        if (repeatHeld) {
+          setStatus('일시정지');
+          paintSeekBar();
+          return;
+        }
         if (repeatAt > Date.now()) {
           setStatus(Math.ceil((repeatAt - Date.now()) / 1000) + '초 뒤에 ' + (endMode === 'next' ? '다음 영상을 재생합니다' : '다시 재생합니다'));
         } else {
@@ -3403,6 +3493,7 @@
     if (!videoStartWall) {
       videoStartWall = Date.now();
       fitStage();
+      if (overlayOpen()) armChromeTimer();
       debugPlayback('first-video-frame', {
         start: startAt,
         videoTime: player && player.video ? player.video.currentTime : 0,
@@ -3789,6 +3880,11 @@
     }, 120);
   }
 
+  function skipSeconds(delta) {
+    var base = pendingSeekSec != null ? pendingSeekSec : currentPos();
+    seekTo(base + delta);
+  }
+
   function seekPctFromEvent(e) {
     var wrap = $('seekWrap');
     if (!wrap || !duration) return 0;
@@ -3812,19 +3908,50 @@
     if ($('npTime')) $('npTime').textContent = fmtPlayClock(seekPick) + ' / ' + fmtPlayClock(duration);
   }
 
-  function flashTap(symbol) {
-    var icon = $('tapIcon');
-    if (!icon) return;
-    icon.textContent = symbol;
-    icon.className = 'tap-icon show';
-    if (tapHide) clearTimeout(tapHide);
-    tapHide = setTimeout(function () { icon.className = 'tap-icon'; }, 500);
+  function overlayOpen() {
+    var box = $('playerBox');
+    return !!(box && box.classList.contains('overlay-on'));
   }
 
-  function onPlayerTap() {
+  function hideChromeOverlay() {
+    var box = $('playerBox');
+    if (chromeTimer) { clearTimeout(chromeTimer); chromeTimer = null; }
+    if (box) box.classList.remove('overlay-on');
+  }
+
+  function armChromeTimer() {
+    if (chromeTimer) { clearTimeout(chromeTimer); chromeTimer = null; }
+    if (paused || ended || !playing || !videoStartWall) return;
+    chromeTimer = setTimeout(function () {
+      chromeTimer = null;
+      if (paused || ended || !playing || !videoStartWall) return;
+      hideChromeOverlay();
+    }, 5000);
+  }
+
+  function showChromeOverlay() {
+    var box = $('playerBox');
+    if (box) box.classList.add('overlay-on');
+    armChromeTimer();
+  }
+
+  function syncChromeAfterPlay() {
+    if (paused || ended || !playing || !videoStartWall) {
+      if (chromeTimer) { clearTimeout(chromeTimer); chromeTimer = null; }
+      return;
+    }
+    if (overlayOpen()) armChromeTimer();
+  }
+
+  function bumpChrome() {
+    if (overlayOpen()) armChromeTimer();
+    else showChromeOverlay();
+  }
+
+  function onEmptyTap() {
     unlockPlaybackAudio();
-    if (!playing || !videoStartWall) return;
-    togglePause();
+    if (overlayOpen()) hideChromeOverlay();
+    else showChromeOverlay();
   }
 
   function copyChannel(buf, channel, from) {
@@ -3985,7 +4112,9 @@
     if (!playing) return;
     if (ended) {
       ended = false;
+      hideRepeatAsk();
       playUrl(playing, 0);
+      showChromeOverlay();
       return;
     }
     if (!paused) {
@@ -4004,14 +4133,13 @@
       applyStreamHold();
       if (na) { try { na.pause(); } catch (e) {} }
       paintPlayButton();
-      flashTap('▶');
       applyChrome();
+      showChromeOverlay();
       paintSeekBar();
       setStatus('일시정지 · 미리 받는 중');
     } else {
       paused = false;
       paintPlayButton();
-      flashTap('❚❚');
       applyChrome();
       // A healthy socket can resume in place. Rebuilding the stream on a
       // short pause throws away the buffer and lands the clock on a new seek.
@@ -4021,6 +4149,7 @@
         pausePos = -1;
         playUrl(playing, resumeSec, { skipInfo: true });
         paintSeekBar();
+        showChromeOverlay();
         return;
       }
       pauseWall = 0;
@@ -4030,44 +4159,54 @@
         pausePos = -1;
         playUrl(playing, reconnectSec, { skipInfo: true });
         paintSeekBar();
+        showChromeOverlay();
         return;
       }
       if (!player) {
-        var resumeSec = pausePos >= 0 ? pausePos : startAt;
+        var resumeSec2 = pausePos >= 0 ? pausePos : startAt;
         pausePos = -1;
-        playUrl(playing, resumeSec);
+        playUrl(playing, resumeSec2);
       } else {
         videoCatching = true;
         resumePlayback();
       }
       paintSeekBar();
       setStatus('재생');
+      showChromeOverlay();
     }
   }
 
   function paintPlayButton() {
+    var pausedNow = !!paused;
     var btn = $('btnPause');
-    if (!btn) return;
-    btn.classList.toggle('is-paused', !!paused);
-    btn.setAttribute('aria-label', paused ? '재생' : '일시정지');
+    if (btn) {
+      btn.classList.toggle('is-paused', pausedNow);
+      btn.setAttribute('aria-label', pausedNow ? '재생' : '일시정지');
+    }
+    var icon = $('tapIcon');
+    if (icon) {
+      icon.classList.toggle('is-paused', pausedNow);
+      icon.setAttribute('aria-label', pausedNow ? '재생' : '일시정지');
+    }
   }
 
   function paintFsButton() {
     var btn = $('btnFs');
-    if (!btn) return;
-    btn.setAttribute('aria-label', fsOn ? '전체화면 종료' : '전체화면');
+    if (btn) btn.setAttribute('aria-label', fsOn ? '전체화면 종료' : '전체화면');
+    var back = $('btnWatchBack');
+    if (back) back.setAttribute('aria-label', fsOn ? '전체화면 종료' : '뒤로');
   }
 
   function applyChrome() {
     var box = $('playerBox');
     if (!box) return;
-    var controls = box.classList.contains('controls-visible');
+    var overlay = box.classList.contains('overlay-on');
     var cls = 'player-box on';
     if (fsOn) cls += ' fs';
     if (fsOn && fsAlign === 'center') cls += ' fs-center';
     if (fsOn && fsAlign === 'bottom') cls += ' fs-bottom';
     if (paused) cls += ' paused';
-    if (controls) cls += ' controls-visible';
+    if (overlay) cls += ' overlay-on';
     box.className = cls;
     document.body.className = fsOn ? 'player-fs' : '';
     paintFsButton();
@@ -4090,11 +4229,21 @@
     wrap.style.top = '';
     wrap.style.right = '';
     wrap.style.bottom = '';
-    wrap.style.width = '100%';
     wrap.style.height = '0';
-    wrap.style.margin = '';
     wrap.style.transform = '';
-    wrap.style.paddingBottom = (100 / (videoAr > 0.1 ? videoAr : (16 / 9))) + '%';
+    var ar = videoAr > 0.1 ? videoAr : (16 / 9);
+    var bleed = document.documentElement && document.documentElement.classList.contains('watch-doc');
+    if (bleed) {
+      wrap.style.width = '100vw';
+      wrap.style.maxWidth = '100vw';
+      wrap.style.marginLeft = 'calc(50% - 50vw)';
+      wrap.style.marginRight = 'calc(50% - 50vw)';
+      wrap.style.paddingBottom = (100 / ar) + 'vw';
+    } else {
+      wrap.style.width = '100%';
+      wrap.style.margin = '';
+      wrap.style.paddingBottom = (100 / ar) + '%';
+    }
   }
 
   function fitStage() {
@@ -4141,11 +4290,12 @@
     var box = $('playerBox');
     if (!box) return;
     fsOn = !!on;
-    if (!fsOn && fsControlsTimer) {
-      clearTimeout(fsControlsTimer);
-      fsControlsTimer = null;
+    if (!fsOn) {
+      try { sessionStorage.removeItem('tv_fs_keep'); } catch (eFsOff) {}
     }
     applyChrome();
+    if (fsOn) hideChromeOverlay();
+    else showChromeOverlay();
     setTimeout(fitStage, 0);
     setTimeout(fitStage, 80);
     setTimeout(function () {
@@ -4154,22 +4304,6 @@
       requestSoundSync();
       scheduleResumeSync(0);
     }, 120);
-  }
-
-  function toggleFsControls() {
-    var box = $('playerBox');
-    if (!box || !fsOn) return;
-    if (box.classList.contains('controls-visible')) {
-      box.classList.remove('controls-visible');
-      if (fsControlsTimer) { clearTimeout(fsControlsTimer); fsControlsTimer = null; }
-      return;
-    }
-    box.classList.add('controls-visible');
-    if (fsControlsTimer) clearTimeout(fsControlsTimer);
-    fsControlsTimer = setTimeout(function () {
-      fsControlsTimer = null;
-      if (fsOn && !paused) box.classList.remove('controls-visible');
-    }, 10000);
   }
 
   function applyPlayerVol() {
@@ -4219,6 +4353,11 @@
     if (opts.auto) setAutoRunCount(opts.resetRun ? 1 : autoRunCount() + 1);
     else setAutoRunCount(0);
     hideAutoAsk();
+    hideRepeatAsk();
+    try {
+      if (opts.auto && fsOn) sessionStorage.setItem('tv_fs_keep', '1');
+      else sessionStorage.removeItem('tv_fs_keep');
+    } catch (eFsKeep) {}
     var fromQ = destFavs ? '&from=favs' : '';
     if (id) location.href = tv.url('/watch/?v=' + encodeURIComponent(id) + fromQ);
     else if (url) location.href = tv.url('/watch/?url=' + encodeURIComponent(url) + fromQ);
@@ -4236,6 +4375,8 @@
     writeWatchBack(stack);
     stop(false);
     setAutoRunCount(0);
+    hideRepeatAsk();
+    try { sessionStorage.removeItem('tv_fs_keep'); } catch (eFsBack) {}
     if (prev && prev.from === 'favs') setWatchFrom('favs');
     else setWatchFrom('');
     var fromQ = prev && prev.from === 'favs' ? '&from=favs' : '';
@@ -4270,10 +4411,59 @@
     if (list) list.innerHTML = '<div class="notice">다른 동영상을 검색해 보세요.</div><div class="watch-fill"></div>';
   }
 
+  function armSearchGuard(el, q) {
+    if (!el) return;
+    el._guardQ = q;
+    el._guardUntil = Date.now() + 500;
+    if (el.value !== q) el.value = q;
+  }
+
+  function keepSearchText(el) {
+    if (!el || !el._guardQ || Date.now() > el._guardUntil) return;
+    var q = el._guardQ;
+    var last = q.charAt(q.length - 1);
+    if (last && el.value === q + last) el.value = q;
+  }
+
+  function bindSearchEnter(el, submit) {
+    if (!el) return;
+    var lastAt = 0;
+    var lastQ = '';
+    function run(q) {
+      var now = Date.now();
+      if (q === lastQ && now - lastAt < 400) return;
+      lastAt = now;
+      lastQ = q;
+      submit(q);
+    }
+    el._composing = false;
+    el._enterPending = false;
+    el.addEventListener('compositionstart', function () { el._composing = true; });
+    el.addEventListener('compositionend', function () {
+      el._composing = false;
+      if (!el._enterPending) return;
+      el._enterPending = false;
+      var q = el.value;
+      setTimeout(function () { run(q); }, 0);
+    });
+    el.addEventListener('keydown', function (e) {
+      var enter = e.key === 'Enter' || e.keyCode === 13;
+      if (!enter) return;
+      if (e.isComposing || e.keyCode === 229 || el._composing) {
+        el._enterPending = true;
+        return;
+      }
+      if (e.preventDefault) e.preventDefault();
+      var q = el.value;
+      setTimeout(function () { run(q); }, 0);
+    });
+    el.addEventListener('input', function () { keepSearchText(el); });
+  }
+
   function doWatchSearch(raw) {
     var q = String(raw || '').trim();
-    if ($('qWatch')) $('qWatch').value = q;
-    if ($('qWatchTab')) $('qWatchTab').value = q;
+    armSearchGuard($('qWatch'), q);
+    armSearchGuard($('qWatchTab'), q);
     if (!q) {
       clearWatchSearchResults();
       return;
@@ -4289,23 +4479,19 @@
   if ($('btnWatchSearch')) $('btnWatchSearch').onclick = function () {
     doWatchSearch(($('qWatch') && $('qWatch').value) || '');
   };
-  if ($('qWatch')) $('qWatch').onkeydown = function (e) {
-    if (e.key === 'Enter') doWatchSearch(this.value);
-  };
+  bindSearchEnter($('qWatch'), doWatchSearch);
   if ($('btnWatchTabSearch')) $('btnWatchTabSearch').onclick = function () {
     doWatchSearch(($('qWatchTab') && $('qWatchTab').value) || '');
   };
-  if ($('qWatchTab')) $('qWatchTab').onkeydown = function (e) {
-    if (e.key === 'Enter') doWatchSearch(this.value);
-  };
+  bindSearchEnter($('qWatchTab'), doWatchSearch);
 
-  if ($('btnGo')) $('btnGo').onclick = function () {
-    var q = $('q').value.trim();
+  function submitHomeSearch(raw) {
+    var q = String(raw || '').trim();
+    armSearchGuard($('q'), q);
     if (!q) {
       lastQuery = '';
       lastSearchItems = [];
       lastSearchChannels = [];
-      if ($('q')) $('q').value = '';
       loadHome();
       return;
     }
@@ -4315,8 +4501,11 @@
       return;
     }
     search(q);
+  }
+  if ($('btnGo')) $('btnGo').onclick = function () {
+    submitHomeSearch(($('q') && $('q').value) || '');
   };
-  if ($('q')) $('q').onkeydown = function (e) { if (e.key === 'Enter' && $('btnGo')) $('btnGo').click(); };
+  bindSearchEnter($('q'), submitHomeSearch);
   if ($('btnAppHome')) $('btnAppHome').onclick = function () { tv.home(); };
   if ($('btnYtHome')) $('btnYtHome').onclick = function (e) {
     if (e && e.preventDefault) e.preventDefault();
@@ -4327,6 +4516,7 @@
     var url = playing || (watchItem && watchItem.url) || '';
     rememberWatch(id, url);
     unlockPlaybackAudio();
+    try { sessionStorage.removeItem('tv_fs_keep'); } catch (eFsReload) {}
     var fromQ = watchFromFavs() ? '&from=favs' : '';
     if (id) {
       location.replace(tv.url('/watch/?v=' + encodeURIComponent(id) + fromQ + '&r=' + Date.now()));
@@ -4339,7 +4529,9 @@
     location.reload();
   }
   if ($('btnWatchReload')) $('btnWatchReload').onclick = function () { reloadWatch(); };
-  if ($('btnWatchBack')) $('btnWatchBack').onclick = function () {
+  if ($('btnWatchBack')) $('btnWatchBack').onclick = function (e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (fsOn) { setFs(false); return; }
     backWatch();
   };
   if ($('btnBotHelp')) $('btnBotHelp').onclick = function () {
@@ -4363,6 +4555,8 @@
     if (repeatEnabled && ended) scheduleRepeatPlayback();
     if (!repeatEnabled && endMode === 'repeat') {
       clearEndTimer();
+      hideRepeatAsk();
+      repeatHeld = false;
       if (autoplayNext && ended) scheduleNextPlayback();
       else if (ended) setStatus('종료');
     }
@@ -4393,9 +4587,8 @@
     if (!playing) return;
     playUrl(playing, 0, { skipInfo: true });
   };
-  if ($('tapLayer')) $('tapLayer').onclick = onPlayerTap;
   if ($('playerBox')) $('playerBox').onclick = function (e) {
-    if (fsOn && e.target === this) toggleFsControls();
+    if (e.target === this) onEmptyTap();
   };
   function bindTap(el, fn) {
     if (!el) return;
@@ -4419,14 +4612,217 @@
       go(e);
     };
   }
-  bindTap($('btnBack'), function () {
-    var base = pendingSeekSec != null ? pendingSeekSec : currentPos();
-    seekTo(base - 10);
-  });
-  bindTap($('btnFwd'), function () {
-    var base = pendingSeekSec != null ? pendingSeekSec : currentPos();
-    seekTo(base + 10);
-  });
+  (function bindCenterPress() {
+    var icon = $('tapIcon');
+    if (!icon) return;
+    var start = null;
+    var last = 0;
+    var touchAt = 0;
+    function run(e) {
+      if (e && e.preventDefault) e.preventDefault();
+      if (e && e.stopPropagation) e.stopPropagation();
+      var now = Date.now();
+      if (now - last < 600) return;
+      last = now;
+      if (!overlayOpen()) return;
+      togglePause();
+    }
+    icon.addEventListener('touchstart', function (e) {
+      touchAt = Date.now();
+      var t = e.touches && e.touches[0];
+      if (!t) return;
+      start = { x: t.clientX, y: t.clientY, touch: true };
+    }, false);
+    icon.addEventListener('touchend', function (e) {
+      touchAt = Date.now();
+      var t = (e.changedTouches && e.changedTouches[0]) || null;
+      var x = t ? t.clientX : (start ? start.x : 0);
+      var y = t ? t.clientY : (start ? start.y : 0);
+      var s = start;
+      start = null;
+      if (!s || !t) return;
+      var dx = x - s.x;
+      var dy = y - s.y;
+      if (dx < 0) dx = -dx;
+      if (dy < 0) dy = -dy;
+      if (dx >= 10 || dy >= 10) {
+        if (e.preventDefault) e.preventDefault();
+        return;
+      }
+      run(e);
+    }, false);
+    icon.onmousedown = function (e) {
+      if (Date.now() - touchAt < 700) return;
+      if (e.button != null && e.button !== 0) return;
+      start = { x: e.clientX, y: e.clientY, touch: false };
+    };
+    icon.onmouseup = function (e) {
+      if (Date.now() - touchAt < 700) return;
+      var s = start;
+      start = null;
+      if (!s || s.touch) return;
+      var dx = e.clientX - s.x;
+      var dy = e.clientY - s.y;
+      if (dx < 0) dx = -dx;
+      if (dy < 0) dy = -dy;
+      if (dx >= 10 || dy >= 10) return;
+      run(e);
+    };
+  })();
+  (function bindStageGesture() {
+    var layer = $('tapLayer');
+    if (!layer) return;
+    var gesture = null;
+    var mouseGesture = null;
+    var lastTouchAt = 0;
+    function pointOf(e) {
+      var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+      return { x: t.clientX, y: t.clientY };
+    }
+    var pendingTap = null;
+    var skipFlashTimer = 0;
+    var skipFlashDir = 0;
+    function clearPendingTap() {
+      if (!pendingTap) return;
+      clearTimeout(pendingTap.timer);
+      pendingTap = null;
+    }
+    function zoneAt(x) {
+      var r = layer.getBoundingClientRect();
+      var w = r.width || 1;
+      var p = (x - r.left) / w;
+      return p < 0.5 ? -1 : 1;
+    }
+    function showSkipFlash(dir) {
+      var back = $('skipBack');
+      var fwd = $('skipFwd');
+      if (back) back.className = dir < 0 ? 'skip-flash skip-back on' : 'skip-flash skip-back';
+      if (fwd) fwd.className = dir > 0 ? 'skip-flash skip-fwd on' : 'skip-flash skip-fwd';
+      skipFlashDir = dir;
+      if (skipFlashTimer) clearTimeout(skipFlashTimer);
+      skipFlashTimer = setTimeout(function () {
+        skipFlashTimer = 0;
+        skipFlashDir = 0;
+        if (back) back.className = 'skip-flash skip-back';
+        if (fwd) fwd.className = 'skip-flash skip-fwd';
+      }, 800);
+    }
+    function commitSkip(zone) {
+      if (!playing || isLive) {
+        onEmptyTap();
+        return;
+      }
+      skipSeconds(zone < 0 ? -10 : 10);
+      showSkipFlash(zone);
+    }
+    // A lone tap waits briefly so a second tap on the same half can seek
+    // without also toggling the overlay.
+    function onStageTap(x) {
+      unlockPlaybackAudio();
+      var now = Date.now();
+      var zone = zoneAt(x);
+      if (skipFlashTimer && skipFlashDir === zone) {
+        clearPendingTap();
+        commitSkip(zone);
+        return;
+      }
+      if (pendingTap && (now - pendingTap.at) <= 400 && pendingTap.zone === zone) {
+        clearPendingTap();
+        commitSkip(zone);
+        return;
+      }
+      clearPendingTap();
+      pendingTap = {
+        at: now,
+        zone: zone,
+        timer: setTimeout(function () {
+          pendingTap = null;
+          onEmptyTap();
+        }, 400)
+      };
+    }
+    function finishGesture(x0, y0, x1, y1) {
+      var dx = x1 - x0;
+      var dy = y1 - y0;
+      var adx = dx < 0 ? -dx : dx;
+      var ady = dy < 0 ? -dy : dy;
+      if (adx < 10 && ady < 10) {
+        onStageTap(x1);
+        return;
+      }
+      clearPendingTap();
+      if (ady < 50 || ady <= adx) return;
+      unlockPlaybackAudio();
+      if (dy < 0 && !fsOn) setFs(true);
+      else if (dy > 0 && fsOn) setFs(false);
+    }
+    layer.addEventListener('touchstart', function (e) {
+      lastTouchAt = Date.now();
+      if (!e.touches || e.touches.length !== 1) { gesture = null; return; }
+      var p = pointOf(e);
+      gesture = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    }, false);
+    function endTouch(e) {
+      lastTouchAt = Date.now();
+      if (!gesture) return;
+      var g = gesture;
+      gesture = null;
+      var p = pointOf(e);
+      var x = p && isFinite(p.x) ? p.x : g.x1;
+      var y = p && isFinite(p.y) ? p.y : g.y1;
+      finishGesture(g.x0, g.y0, x, y);
+    }
+    layer.addEventListener('touchmove', function (e) {
+      if (!gesture) return;
+      if (!e.touches || e.touches.length !== 1) return;
+      var p = pointOf(e);
+      gesture.x1 = p.x;
+      gesture.y1 = p.y;
+    }, false);
+    layer.addEventListener('touchend', function (e) { endTouch(e); }, false);
+    layer.addEventListener('touchcancel', function (e) { endTouch(e); }, false);
+    layer.onmousedown = function (e) {
+      if (Date.now() - lastTouchAt < 700) return;
+      if (e.button != null && e.button !== 0) return;
+      mouseGesture = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+    };
+    document.addEventListener('mousemove', function (e) {
+      if (!mouseGesture) return;
+      mouseGesture.x1 = e.clientX;
+      mouseGesture.y1 = e.clientY;
+    });
+    document.addEventListener('mouseup', function (e) {
+      if (!mouseGesture) return;
+      var g = mouseGesture;
+      mouseGesture = null;
+      var x = e && typeof e.clientX === 'number' ? e.clientX : g.x1;
+      var y = e && typeof e.clientY === 'number' ? e.clientY : g.y1;
+      finishGesture(g.x0, g.y0, x, y);
+    });
+  })();
+  function chromeControlTarget(node) {
+    var box = $('playerBox');
+    if (!box || !node || !box.contains(node)) return false;
+    var t = node;
+    while (t && t !== box) {
+      if (t.id === 'tapLayer' || t.id === 'tapIcon') return false;
+      if (t.id === 'btnFs') return false;
+      if (t.id === 'seekWrap' || t.id === 'btnWatchBack') return true;
+      if (t.classList && (t.classList.contains('bar-bottom') || t.classList.contains('ctrl') || t.classList.contains('autoplay-toggle') || t.classList.contains('vol-wrap') || t.classList.contains('hud-back'))) return true;
+      var tag = t.tagName ? t.tagName.toLowerCase() : '';
+      if (tag === 'button' || tag === 'input') return true;
+      t = t.parentNode;
+    }
+    return false;
+  }
+  document.addEventListener('touchstart', function (e) {
+    if (chromeControlTarget(e.target)) bumpChrome();
+  }, true);
+  document.addEventListener('mousedown', function (e) {
+    if (chromeControlTarget(e.target)) bumpChrome();
+  }, true);
+  bindTap($('btnBack'), function () { skipSeconds(-10); });
+  bindTap($('btnFwd'), function () { skipSeconds(10); });
   if ($('btnFs')) $('btnFs').onclick = function (e) { if (e) e.stopPropagation(); setFs(!fsOn); };
   var lastVol = 100;
   var volTouched = false;
@@ -4452,6 +4848,7 @@
     volTouched = true;
     lastVol = parseInt(this.value, 10) || 0;
     setVol(lastVol);
+    bumpChrome();
   };
   if ($('btnMute')) $('btnMute').onclick = function () {
     volTouched = true;
@@ -4470,6 +4867,7 @@
     };
     wrap.ontouchmove = function (e) {
       if (!seeking) return;
+      bumpChrome();
       previewSeek(seekPctFromEvent(e));
       if (e.preventDefault) e.preventDefault();
     };
@@ -4487,6 +4885,7 @@
     };
     wrap.onmousemove = function (e) {
       if (seekTouch || !seeking) return;
+      bumpChrome();
       previewSeek(seekPctFromEvent(e));
     };
     wrap.onmouseup = function (e) {
@@ -4511,6 +4910,7 @@
   if ($('seek')) {
     $('seek').oninput = function () {
       if (!duration) return;
+      bumpChrome();
       seeking = true;
       var v = parseFloat(this.value) || 0;
       previewSeek(Math.max(0, Math.min(1, v / duration)));
@@ -4786,6 +5186,7 @@
     if ((e.key === 'f' || e.key === 'F') && playing) setFs(!fsOn);
   });
 
+  if (stage) showChromeOverlay();
   tv.ensurePin(function () {
     tv.get('/api/auth/status', function (c, d) {
       currentPin = (d && d.pin) || '';
