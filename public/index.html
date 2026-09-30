@@ -4,6 +4,20 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script>
+(function () {
+  var q = String(location.search || '');
+  if (/(?:^|[?&])stay=1(?:&|$)/.test(q)) {
+    document.documentElement.className += (document.documentElement.className ? ' ' : '') + 'stay';
+    return;
+  }
+  var path = String(location.pathname || '/');
+  var base = path.replace(/\/index\.html$/i, '').replace(/\/$/, '');
+  var keep = q.replace(/^\?/, '').replace(/(^|&)stay=1(?=&|$)/g, '$1').replace(/&&+/g, '&').replace(/^&|&$/g, '');
+  location.replace(base + '/player/?home=1' + (keep ? '&' + keep : ''));
+})();
+</script>
+<style>html:not(.stay) body { display: none !important; }</style>
 <title>Tesla Video Drive</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="css/app.css?v=27">
@@ -99,11 +113,19 @@
   </div>
 </div>
 <script src="config.js?v=24"></script>
-<script src="js/common.js?v=26"></script>
+<script src="js/common.js?v=28"></script>
 <script>
-tv.ensurePin(function(){});
+tv.ensurePin(function () {
+  var stay = /(?:^|[?&])stay=1(?:&|$)/.test(String(location.search || ''));
+  if (stay) return;
+  location.replace(tv.url('/player/?home=1'));
+});
 var lo = document.getElementById('btnLogout');
-if (lo) lo.onclick = function () { tv.logout(function () {}); };
+if (lo) lo.onclick = function () {
+  tv.logout(function () {
+    location.replace(tv.url('/player/?home=1'));
+  });
+};
 </script>
 </body>
 </html>

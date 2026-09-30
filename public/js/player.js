@@ -40,6 +40,8 @@
   // Keep enough real audio cushion to absorb transport jitter without letting
   // a long scheduled queue make video recovery visibly late.
   var AUDIO_QUEUE_SEC = 2.5;
+  var BUFFER_SEEK_MAX_SEC = 12;
+  var BUFFER_SEEK_MARGIN_SEC = 1;
   var SEEK_AUDIO_PREROLL_SEC = 3;
   var PREROLL_SEC = 3;
   var bufTarget = 20;
@@ -185,6 +187,7 @@
   var membersShownId = '';
   var libRaw = [];
   var libFilter = '';
+  var subsFindQ = '';
   var libVidFilter = '';
   var libSort = 'new';
   var suggestSortSet = false;
@@ -194,7 +197,18 @@
   var playbackDebug = !!(window.tv && window.tv.getDebug ? window.tv.getDebug() : /(?:^|[?&])debug=1(?:&|$)/.test(String(window.location.search || '')));
   var lastDebugStatus = '';
   var subList = [];
+  var subVideoCache = {};
+  var subsWarmGen = 0;
+  var subsWarmId = '';
+  var subsWarmPaint = null;
+  var subsOpen = null;
+  var subPriority = 0;
+  var subsLoggedDone = '';
+  var subsRosterLogged = '';
+  var SUBS_WARM_HEAD = 8;
+  var SUBS_WARM_AFTER = 2;
   var selectedCh = '';
+  var feedSubCh = null;
   var restoreCh = '';
   var pendingScroll = 0;
   var relatedTimer = null;
@@ -922,6 +936,15 @@
     if (nearBottom()) loadMore();
   }
 
+  function pagerKeepsLib(mode) {
+    return mode === 'subchannel' || mode === 'home' || mode === 'search' || mode === 'related' || mode === 'suggest';
+  }
+
+  function feedUsesLibView(feed) {
+    return feed === 'home' || feed === 'music' || feed === 'game' || feed === 'news'
+      || feed === 'favs' || feed === 'related' || feed === 'search' || feed === 'suggest' || feed === 'subs';
+  }
+
   function loadMore() {
     if (pager.busy || !pager.more) return;
     if (!pager.mode || pager.mode === 'favs') return;
@@ -933,7 +956,7 @@
     var done = function (code, data) {
       if (!stillReq(seq) || pager.mode !== mode) return;
       pager.busy = false;
-      var add = uniqueNew((pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search' || mode === 'suggest'))) ? libRaw : lastItems, (data && data.items) || []);
+      var add = uniqueNew(pagerKeepsLib(mode) ? libRaw : lastItems, (data && data.items) || []);
       if (!data || !data.ok || !add.length) {
         pager.more = false;
         paintMoreBar();
@@ -941,7 +964,7 @@
       }
       pager.offset += add.length;
       pager.more = data.more !== false && add.length >= 8;
-      if (pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search' || mode === 'suggest'))) {
+      if (pagerKeepsLib(mode)) {
         libRaw = libRaw.concat(add);
         if (mode === 'search') lastSearchItems = libRaw.slice();
         applyLibView();
@@ -1055,6 +1078,7 @@
     if (!el) return;
     el.style.display = on ? 'block' : 'none';
     if ($('libFilter')) {
+      $('libFilter').style.display = (on && kind === 'subs') ? 'none' : '';
       $('libFilter').placeholder = kind === 'subs' ? '채널명으로 검색' : '제목 또는 채널명으로 필터';
     }
     if ($('libVidFilter')) $('libVidFilter').style.display = kind === 'subs' ? 'block' : 'none';
@@ -1116,6 +1140,8 @@
       items.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
     } else if (currentFeed === 'favs' && (libSort === 'old' || libSort === 'new')) {
       items = sortFavsBySaved(items, libSort);
+    } else if (currentFeed === 'home' && (libSort === 'old' || libSort === 'new')) {
+      if (libSort === 'old') items.reverse();
     } else if (libSort === 'old' || libSort === 'new') {
       if (hasSortTime(items)) {
         var indexed = items.map(function (it, i) { return { it: it, i: i }; });
@@ -1198,9 +1224,53 @@
   function showSubsRail(on) {
     var td = $('subsTd');
     var split = document.querySelector('.feed-split');
-    if (td) td.style.display = on ? 'table-cell' : 'none';
-    if (split) split.className = 'feed-split' + (on ? ' subs-on' : '');
-    if (!on) selectedCh = '';
+    if (td) td.style.display = '';
+    if (split) {
+      var watch = split.className.indexOf('watch-feed') >= 0;
+      split.className = 'feed-split subs-on' + (watch ? ' watch-feed' : '');
+    }
+    if (!on && selectedCh) {
+      selectedCh = '';
+      feedSubCh = null;
+      renderRail();
+    }
+    paintFeedSub();
+  }
+
+  function paintFeedSub() {
+    var box = $('feedSub');
+    if (!box) return;
+    var show = currentFeed === 'subs' && !!selectedCh;
+    box.style.display = show ? '' : 'none';
+    if (!show) return;
+    var ch = subChannelById(selectedCh) || subIds[selectedCh] || feedSubCh || { channel_id: selectedCh, name: selectedCh };
+    feedSubCh = ch;
+    if ($('feedSubName')) $('feedSubName').textContent = ch.name || ch.channel_id || '';
+    var btn = $('btnFeedSub');
+    if (!btn) return;
+    var on = !!subIds[selectedCh];
+    btn.className = 'sub-btn' + (on ? ' on' : '');
+    btn.textContent = on ? '구독중' : '구독';
+  }
+
+  function syncSubListMembership(ch, on) {
+    if (!ch || !ch.channel_id) return;
+    var id = ch.channel_id;
+    var idx = -1;
+    var i;
+    for (i = 0; i < subList.length; i++) {
+      if (subList[i] && subList[i].channel_id === id) { idx = i; break; }
+    }
+    if (on) {
+      if (idx < 0) {
+        if (!ch.ts) ch.ts = Date.now();
+        subList.push(ch);
+        subList = sortSubList(subList);
+      }
+    } else if (idx >= 0) {
+      subList.splice(idx, 1);
+    }
+    renderRail();
   }
 
   function isUnread(ch) {
@@ -1214,7 +1284,8 @@
   }
 
   function filteredSubList() {
-    var q = (libFilter || '').toLowerCase();
+    var q = subsFindQ || (currentFeed === 'subs' ? libFilter : '');
+    q = String(q || '').toLowerCase();
     if (!q) return subList.slice();
     return subList.filter(function (ch) {
       return String(ch.name || '').toLowerCase().indexOf(q) >= 0;
@@ -1241,47 +1312,397 @@
     hydrateAvatars();
   }
 
+  function pageScrollY() {
+    return window.pageYOffset || (document.documentElement && document.documentElement.scrollTop) || (document.body && document.body.scrollTop) || 0;
+  }
+
+  function restorePageScroll(y) {
+    if (!(y > 0)) return;
+    try { window.scrollTo(0, y); } catch (e) {}
+    try { if (document.body) document.body.scrollTop = y; } catch (e2) {}
+  }
+
+  function subChannelById(id) {
+    for (var i = 0; i < subList.length; i++) {
+      if (subList[i].channel_id === id) return subList[i];
+    }
+    return null;
+  }
+
+  function rememberSubCache(id, data) {
+    var prev = subVideoCache[id];
+    var items = (data && data.items) ? data.items.slice() : [];
+    if (prev && prev.items && prev.items.length > items.length) items = prev.items.slice();
+    subVideoCache[id] = {
+      ok: true,
+      failed: false,
+      items: items,
+      more: !!(data && data.more !== false && items.length >= 8),
+      channel: (data && data.channel) || (prev && prev.channel) || null
+    };
+  }
+
+  function markSubFailed(id, error) {
+    subVideoCache[id] = { ok: false, failed: true, items: null, error: String(error || '실패'), channel: null, more: false };
+  }
+
+  function subChannelName(id) {
+    var ch = subChannelById(id) || subIds[id];
+    return (ch && (ch.name || ch.channel_id)) || id || '';
+  }
+
+  function subLoadProgress() {
+    var total = 0;
+    var done = 0;
+    var failed = 0;
+    var i;
+    for (i = 0; i < subList.length; i++) {
+      var cid = subList[i] && subList[i].channel_id;
+      if (!cid) continue;
+      total++;
+      var cached = subVideoCache[cid];
+      if (cached && cached.ok) done++;
+      else if (cached && cached.failed) failed++;
+    }
+    return { total: total, done: done, failed: failed, pending: total - done - failed };
+  }
+
+  function selectedSubIndex() {
+    var i;
+    if (!selectedCh) return -1;
+    for (i = 0; i < subList.length; i++) {
+      if (subList[i] && subList[i].channel_id === selectedCh) return i;
+    }
+    return -1;
+  }
+
+  // The rail stays on the YouTube screens. Prefetch the top of that rail,
+  // and the opened channel plus the two below it when the channel is past the top.
+  function subsWarmTarget(i) {
+    if (i < 0 || i >= subList.length) return false;
+    if (!(subList[i] && subList[i].channel_id)) return false;
+    if (i < SUBS_WARM_HEAD) return true;
+    var sel = selectedSubIndex();
+    if (sel < SUBS_WARM_HEAD) return false;
+    return i >= sel && i <= sel + SUBS_WARM_AFTER;
+  }
+
+  function subWarmProgress() {
+    var total = 0;
+    var done = 0;
+    var failed = 0;
+    var i;
+    for (i = 0; i < subList.length; i++) {
+      if (!subsWarmTarget(i)) continue;
+      total++;
+      var cached = subVideoCache[subList[i].channel_id];
+      if (cached && cached.ok) done++;
+      else if (cached && cached.failed) failed++;
+    }
+    return { total: total, done: done, failed: failed, pending: total - done - failed };
+  }
+
+  function logSubs(msg) {
+    if (!playbackDebug || !window.console || !console.log) return;
+    try { console.log('[tesla-video subs]', msg); } catch (e) {}
+  }
+
+  function logSubsRoster() {
+    var ids = [];
+    var parts = [];
+    var i;
+    for (i = 0; i < subList.length; i++) {
+      var ch = subList[i];
+      if (!ch || !ch.channel_id) continue;
+      ids.push(ch.channel_id);
+      parts.push((parts.length + 1) + '.' + (ch.name || ch.channel_id) + '(재생 ' + (ch.watch_count || 0) + ')');
+    }
+    var key = ids.join(',');
+    if (!key || key === subsRosterLogged) return;
+    subsRosterLogged = key;
+    subsLoggedDone = '';
+    logSubs('구독 채널 ' + parts.length + '개');
+    var shown = parts.length;
+    var extra = 0;
+    if (parts.length > 20) {
+      shown = SUBS_WARM_HEAD;
+      extra = parts.length - shown;
+    }
+    for (i = 0; i < shown; i++) logSubs(parts[i]);
+    if (extra) logSubs('외 ' + extra + '개');
+  }
+
+  function showSubsLoadStatus() {
+    if (currentFeed !== 'subs' || playing) return;
+    var p = subWarmProgress();
+    var all = subLoadProgress();
+    if (!all.total) return;
+    var ch = subChannelById(selectedCh);
+    var head = (ch && selectedCh) ? ((ch.name || '채널') + ' · ' + ((libRaw && libRaw.length) || 0) + '개') : ('구독 ' + all.total + '개');
+    var tail = p.pending
+      ? ('미리받기 ' + (p.done + p.failed) + '/' + p.total + (subsWarmId ? (' · ' + subChannelName(subsWarmId)) : ''))
+      : (p.failed ? ('미리받기 확인 끝 · 실패 ' + p.failed) : ('미리받기 ' + p.done + '/' + p.total));
+    setStatus(head + ' · ' + tail);
+  }
+
+  function logSubsStart(kind, id) {
+    var p = subWarmProgress();
+    logSubs(kind + ' ' + (p.done + p.failed + 1) + '/' + p.total + ' · ' + subChannelName(id) + ' · ' + id);
+    showSubsLoadStatus();
+  }
+
+  function logSubsEnd(kind, id, detail) {
+    var p = subWarmProgress();
+    var all = subLoadProgress();
+    logSubs(kind + ' ' + p.done + '/' + p.total + ' · 실패 ' + p.failed + ' · ' + subChannelName(id) + (detail ? (' · ' + detail) : ''));
+    if (p.total > 0 && p.pending === 0) {
+      var outside = all.total > p.total;
+      var key = p.done + ':' + p.failed + ':' + p.total + ':' + (outside ? String(selectedSubIndex()) : 'all');
+      if (subsLoggedDone !== key) {
+        subsLoggedDone = key;
+        if (outside) {
+          logSubs('미리받기 범위 끝 · 성공 ' + p.done + ' · 실패 ' + p.failed + ' · 범위 ' + p.total + ' · 구독 ' + all.total + '개');
+        } else {
+          logSubs(p.failed
+            ? ('구독 채널 영상 확인 끝 · 성공 ' + p.done + ' · 실패 ' + p.failed + ' · 전체 ' + p.total)
+            : ('구독 채널 영상 모두 불러옴 · ' + p.done + '/' + p.total));
+        }
+      }
+    }
+    showSubsLoadStatus();
+  }
+
+  function mergeOpenChannel(id, channel) {
+    if (!channel) return;
+    for (var j = 0; j < subList.length; j++) {
+      if (subList[j].channel_id !== id) continue;
+      subList[j] = channel;
+      if (selectedCh === id) {
+        subList[j].unread = false;
+        subList[j].last_seen = Date.now();
+      }
+      subIds[id] = subList[j];
+    }
+    rememberAvatars([channel]);
+    renderRail();
+  }
+
+  function paintSubItems(id, items, more) {
+    var ch = subChannelById(id) || subIds[id] || { name: '' };
+    var y = pageScrollY();
+    libRaw = (items || []).slice();
+    pager.offset = libRaw.length;
+    pager.more = more !== false && libRaw.length >= 8;
+    setStatus((ch.name || '채널') + ' · ' + libRaw.length + '개');
+    applyLibView('이 채널에 영상이 없습니다');
+    paintMoreBar();
+    restorePageScroll(y);
+    showSubsLoadStatus();
+  }
+
+  function refreshSubStats(id, seq) {
+    logSubs('상세 확인 시작 · ' + subChannelName(id) + ' · ' + id);
+    subPriority++;
+    tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(id) + '&limit=16', function (code, data) {
+      if (subPriority > 0) subPriority--;
+      if (!stillReq(seq) || currentFeed !== 'subs' || selectedCh !== id) return;
+      if (!data || !data.ok || !data.items) {
+        logSubs('상세 확인 실패 · ' + subChannelName(id) + ' · ' + ((data && data.error) || '응답 없음'));
+        return;
+      }
+      var byId = {};
+      var i;
+      for (i = 0; i < data.items.length; i++) {
+        if (data.items[i] && data.items[i].id) byId[data.items[i].id] = data.items[i];
+      }
+      var cached = subVideoCache[id];
+      var base = (cached && cached.items && cached.items.length) ? cached.items : data.items.slice();
+      for (i = 0; i < base.length; i++) {
+        if (base[i] && byId[base[i].id]) base[i] = byId[base[i].id];
+      }
+      subVideoCache[id] = {
+        ok: true,
+        failed: false,
+        items: base.slice(),
+        more: data.more !== false && base.length >= 8,
+        channel: data.channel || (cached && cached.channel) || null
+      };
+      if (data.channel) mergeOpenChannel(id, data.channel);
+      var memberCount = 0;
+      for (i = 0; i < base.length; i++) if (base[i] && base[i].members) memberCount++;
+      logSubs('상세 확인 완료 · ' + subChannelName(id) + ' · 영상 ' + base.length + '개 · 회원전용 ' + memberCount + '개');
+      if (selectedCh !== id) return;
+      if (libRaw.length > base.length) {
+        for (i = 0; i < libRaw.length; i++) {
+          if (libRaw[i] && byId[libRaw[i].id]) libRaw[i] = byId[libRaw[i].id];
+        }
+        var y = pageScrollY();
+        applyLibView('이 채널에 영상이 없습니다');
+        paintMoreBar();
+        restorePageScroll(y);
+        return;
+      }
+      paintSubItems(id, base, data.more);
+    });
+  }
+
+  function sortSubList(items) {
+    return (items || []).slice().sort(function (a, b) {
+      var ac = a.watch_count || 0;
+      var bc = b.watch_count || 0;
+      if (bc !== ac) return bc - ac;
+      return (b.ts || 0) - (a.ts || 0);
+    });
+  }
+
+  function warmDelay() {
+    if (subPriority > 0) return 600;
+    if (playing) return 6000;
+    return 2000;
+  }
+
+  function nextWarmId() {
+    var i;
+    for (i = 0; i < subList.length; i++) {
+      if (!subsWarmTarget(i)) continue;
+      var cid = subList[i].channel_id;
+      if (!cid || subVideoCache[cid] || cid === subsWarmId) continue;
+      if (subsOpen && cid === subsOpen.id) continue;
+      if (selectedCh && cid === selectedCh) continue;
+      return cid;
+    }
+    return '';
+  }
+
+  // One channel at a time. The rail is always visible here, so the top of
+  // the rail is prefetched on entry. A channel opened past that top also
+  // prefetches the two channels below it.
+  function warmOtherChannels() {
+    var gen = ++subsWarmGen;
+    function step() {
+      if (gen !== subsWarmGen) return;
+      logSubsRoster();
+      if (subPriority > 0 || subsWarmId) {
+        setTimeout(step, 600);
+        return;
+      }
+      var nextId = nextWarmId();
+      if (!nextId) return;
+      setTimeout(function () {
+        if (gen !== subsWarmGen) return;
+        if (nextWarmId() !== nextId || subPriority > 0 || subVideoCache[nextId] || subsWarmId || (subsOpen && subsOpen.id === nextId) || (selectedCh && nextId === selectedCh)) {
+          step();
+          return;
+        }
+        subsWarmId = nextId;
+        logSubsStart('미리받기', nextId);
+        tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(nextId) + '&limit=16&quick=1', function (code, data) {
+          if (subsWarmId === nextId) subsWarmId = '';
+          var paint = subsWarmPaint && subsWarmPaint.id === nextId ? subsWarmPaint : null;
+          if (data && data.ok) {
+            rememberSubCache(nextId, data);
+            logSubsEnd('미리받기 완료', nextId, '영상 ' + ((data.items && data.items.length) || 0) + '개');
+            if (paint && stillReq(paint.seq) && currentFeed === 'subs' && selectedCh === nextId) {
+              subsWarmPaint = null;
+              if (data.channel) mergeOpenChannel(nextId, data.channel);
+              paintSubItems(nextId, (subVideoCache[nextId] && subVideoCache[nextId].items) || [], data.more);
+              if (data.quick) refreshSubStats(nextId, paint.seq);
+            } else if (currentFeed === 'subs' && data.channel && selectedCh !== nextId) {
+              mergeOpenChannel(nextId, data.channel);
+            }
+          } else {
+            markSubFailed(nextId, (data && data.error) || '응답 없음');
+            logSubsEnd('미리받기 실패', nextId, (data && data.error) || '응답 없음');
+            if (paint && stillReq(paint.seq) && currentFeed === 'subs' && selectedCh === nextId) {
+              subsWarmPaint = null;
+              setStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
+              pager.more = false;
+              paintMoreBar();
+              if (list) list.innerHTML = '<div class="notice">이 채널의 영상을 가져오지 못했습니다. 다시 눌러 보세요.</div>';
+            }
+          }
+          if (gen !== subsWarmGen) return;
+          step();
+        });
+      }, warmDelay());
+    }
+    step();
+  }
+
   function openChannel(id) {
-    var ch = null;
-    for (var i = 0; i < subList.length; i++) if (subList[i].channel_id === id) ch = subList[i];
+    var ch = subChannelById(id);
     if (!ch || !id) return;
+    if (currentFeed !== 'subs') resetLib();
+    setChip('subs');
+    showLibTools(true, 'subs');
+    showSubsRail(true);
     var seq = beginReq();
     selectedCh = id;
+    feedSubCh = ch;
+    paintFeedSub();
     ch.unread = false;
     ch.last_seen = Date.now();
     saveBrowseState();
     renderRail();
-    setStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
-    renderSkeleton();
     tv.post('/api/subscriptions/seen', { channel_id: id }, function () {});
     resetPager('subchannel', { id: id, name: ch.name || '' });
-    tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(id) + '&limit=16', function (code, data) {
-      if (!stillReq(seq) || currentFeed !== 'subs' || selectedCh !== id) return;
-      if (!data || !data.ok) {
-        setStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
-        pager.more = false;
-        paintMoreBar();
-        if (list) list.innerHTML = '<div class="notice">이 채널의 영상을 가져오지 못했습니다. 다시 눌러 보세요.</div>';
+    var cached = subVideoCache[id];
+    if (cached && cached.ok) {
+      logSubs('선택 캐시 · ' + subChannelName(id) + ' · 영상 ' + ((cached.items && cached.items.length) || 0) + '개 · ' + id);
+      paintSubItems(id, cached.items || [], cached.more);
+      refreshSubStats(id, seq);
+      warmOtherChannels();
+      return;
+    }
+    if (cached && cached.failed) delete subVideoCache[id];
+    if (subsWarmId === id || (subsOpen && subsOpen.id === id)) {
+      subsWarmPaint = { id: id, seq: seq };
+      if (subsOpen && subsOpen.id === id) subsOpen.seq = seq;
+      logSubs('선택 · 이미 미리받는 중 · ' + subChannelName(id) + ' · ' + id);
+      setStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
+      renderSkeleton();
+      return;
+    }
+    setStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
+    renderSkeleton();
+    logSubsStart('선택', id);
+    subPriority++;
+    subsOpen = { id: id, seq: seq };
+    tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(id) + '&limit=16&quick=1', function (code, data) {
+      if (subPriority > 0) subPriority--;
+      var ticket = subsOpen;
+      var mine = ticket && ticket.id === id;
+      var paintSeq = mine ? ticket.seq : seq;
+      if (mine && subsOpen === ticket) subsOpen = null;
+      var live = stillReq(paintSeq) && currentFeed === 'subs' && selectedCh === id;
+      if (data && data.ok) {
+        rememberSubCache(id, data);
+        logSubsEnd('선택 완료', id, '영상 ' + ((data.items && data.items.length) || 0) + '개');
+        if (!live) {
+          if (currentFeed === 'subs' && !subsOpen) warmOtherChannels();
+          return;
+        }
+        if (data.channel) mergeOpenChannel(id, data.channel);
+        paintSubItems(id, (subVideoCache[id] && subVideoCache[id].items) || data.items || [], data.more);
+        if (data.quick) {
+          refreshSubStats(id, paintSeq);
+          warmOtherChannels();
+        }
         return;
       }
-      if (data.channel) {
-        for (var j = 0; j < subList.length; j++) {
-          if (subList[j].channel_id === id) {
-            subList[j] = data.channel;
-            subList[j].unread = false;
-            subList[j].last_seen = Date.now();
-          }
-        }
-        subIds[id] = data.channel;
-        rememberAvatars([data.channel]);
-        renderRail();
+      if (subsOpen && subsOpen.id === id) return;
+      if (subVideoCache[id] && subVideoCache[id].ok) return;
+      markSubFailed(id, (data && data.error) || '응답 없음');
+      logSubsEnd('선택 실패', id, (data && data.error) || '응답 없음');
+      if (!live) {
+        if (currentFeed === 'subs' && !subsOpen) warmOtherChannels();
+        return;
       }
-      libRaw = data.items || [];
-      pager.offset = libRaw.length;
-      pager.more = data.more !== false && libRaw.length >= 8;
-      setStatus((ch.name || '채널') + ' · ' + libRaw.length + '개');
-      applyLibView('이 채널에 영상이 없습니다');
+      setStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
+      pager.more = false;
       paintMoreBar();
+      if (list) list.innerHTML = '<div class="notice">이 채널의 영상을 가져오지 못했습니다. 다시 눌러 보세요.</div>';
+      warmOtherChannels();
     });
   }
 
@@ -1290,10 +1711,12 @@
     setChip('home');
     clearSearchBox();
     lastChannels = [];
-    showLibTools(false);
+    resetLib();
+    libRaw = [];
+    showLibTools(true, 'list');
     showSubsRail(false);
     resetPager('home');
-    setStatus('홈 피드를 불러오는 중...');
+    setStatus('추천 영상을 불러오는 중...');
     renderSkeleton();
     saveBrowseState();
     tv.get('/api/youtube/home?limit=16', function (code, data) {
@@ -1303,19 +1726,19 @@
         setStatus((data && data.error) ? (data.error + ' → 인기 영상으로 대체') : '홈 실패, 인기 영상으로 대체');
         tv.get('/api/youtube/search?q=' + encodeURIComponent('인기 급상승') + '&limit=16', function (c2, d2) {
           if (!stillReq(seq) || currentFeed !== 'home') return;
-          lastItems = (d2 && d2.items) || [];
+          libRaw = ((d2 && d2.items) || []).slice();
           lastChannels = [];
-          pager.offset = lastItems.length;
+          pager.offset = libRaw.length;
           pager.more = !!(d2 && d2.more);
-          renderItems(lastItems, '영상을 불러오지 못했습니다');
+          applyLibView('영상을 불러오지 못했습니다');
         });
         return;
       }
-      setStatus(data.source === 'subs' ? '구독 채널 최신' : '인기 급상승');
-      lastItems = data.items || [];
-      pager.offset = lastItems.length;
+      setStatus('최근 인기');
+      libRaw = (data.items || []).slice();
+      pager.offset = libRaw.length;
       pager.more = data.more !== false;
-      renderItems(data.items);
+      applyLibView('영상을 불러오지 못했습니다');
     });
   }
 
@@ -1354,9 +1777,13 @@
   function loadSubMap(cb) {
     tv.get('/api/subscriptions', function (code, data) {
       subIds = {};
-      if (data && data.ok && data.items) {
-        for (var i = 0; i < data.items.length; i++) subIds[data.items[i].channel_id] = data.items[i];
-        rememberAvatars(data.items);
+      var items = (data && data.ok && data.items) || [];
+      for (var i = 0; i < items.length; i++) subIds[items[i].channel_id] = items[i];
+      if (items.length) rememberAvatars(items);
+      if (currentFeed !== 'subs') {
+        subList = sortSubList(items);
+        renderRail();
+        if (subList.length) warmOtherChannels();
       }
       paintSubBtn();
       if (cb) cb();
@@ -1463,6 +1890,8 @@
         if (want) delete subIds[id];
         else subIds[id] = ch;
         paintSubEls(id, !want);
+        syncSubListMembership(ch, !want);
+        paintFeedSub();
         setStatus((data && data.error) || '구독을 바꾸지 못했습니다');
         return;
       }
@@ -1477,6 +1906,8 @@
       if (data.on) subIds[nid] = ch;
       else delete subIds[nid];
       paintSubEls(nid, data.on);
+      syncSubListMembership(ch, !!data.on);
+      paintFeedSub();
       setStatus(data.on ? ((ch.name || '채널') + ' 구독 중') : ((ch.name || '채널') + ' 구독 해제'));
     });
   }
@@ -1496,6 +1927,9 @@
     if (want) subIds[id] = ch;
     else delete subIds[id];
     paintSubEls(id, want);
+    syncSubListMembership(ch, want);
+    if (selectedCh === id) feedSubCh = ch;
+    paintFeedSub();
     setStatus(want ? ((ch.name || '채널') + ' 구독 중') : ((ch.name || '채널') + ' 구독 해제'));
     if (subPending[id]) return;
     sendSubState(ch);
@@ -1536,7 +1970,11 @@
     lastChannels = [];
     setChip(chip || 'search');
     if (stage && (!chip || chip === 'search')) showWatchFilters();
-    else showLibTools(false);
+    else if (!stage) {
+      resetLib();
+      libRaw = [];
+      showLibTools(true, 'list');
+    } else showLibTools(false);
     showSubsRail(false);
     saveBrowseState();
     resetPager('search', { q: q });
@@ -1567,7 +2005,7 @@
       var extra = lastChannels.length ? (' · 채널 ' + lastChannels.length + '개') : '';
       var label = chip && chip !== 'search' ? (chip === 'news' ? '뉴스' : chip === 'music' ? '음악' : chip === 'game' ? '게임' : q) : ('"' + q + '" 검색 결과');
       setStatus(label + ' ' + lastItems.length + '개' + extra);
-      if (stage && (!chip || chip === 'search')) {
+      if ((stage && (!chip || chip === 'search')) || !stage) {
         libRaw = lastItems.slice();
         applyLibView('검색 결과 없음');
       } else {
@@ -1598,7 +2036,7 @@
         if (list) list.innerHTML = '<div class="notice">재생 화면에서 채널명 옆 <b>구독</b>을 누르면 이 PIN 계정에 저장됩니다.</div>';
         return;
       }
-      subList = data.items || [];
+      subList = sortSubList(data.items || []);
       subIds = {};
       for (var i = 0; i < subList.length; i++) subIds[subList[i].channel_id] = subList[i];
       if (!subList.length) {
@@ -1625,7 +2063,7 @@
         tv.get('/api/subscriptions/check', function (c2, d2) {
           if (currentFeed !== 'subs') return;
           if (!(d2 && d2.ok && d2.items)) return;
-          subList = d2.items;
+          subList = sortSubList(d2.items);
           for (var j = 0; j < subList.length; j++) {
             if (selectedCh && subList[j].channel_id === selectedCh) {
               subList[j].unread = false;
@@ -1802,14 +2240,16 @@
       if (!driftSince) driftSince = Date.now();
       if (!driftAlerted && Date.now() - driftSince >= 1200) {
         driftAlerted = true;
-        try {
-          console.warn('[tesla-video sync] A/V drift detected', {
-            startAt: startAt,
-            videoTime: vt,
-            audioTime: heard,
-            drift: vt - heard,
-          });
-        } catch (eWarn) {}
+        if (playbackDebug) {
+          try {
+            console.warn('[tesla-video sync] A/V drift detected', {
+              startAt: startAt,
+              videoTime: vt,
+              audioTime: heard,
+              drift: vt - heard,
+            });
+          } catch (eWarn) {}
+        }
       }
     } else if (drift < 0.25) {
       driftSince = 0;
@@ -1871,17 +2311,19 @@
     if (frameGap > 900 && audioAheadSec() < 1.0) {
       if (!outputGapSince) outputGapSince = now;
       if (now - outputGapSince >= 1000) {
-        try {
-          console.warn('[tesla-video output] video frame gap while audio advances', {
-            frameGapMs: frameGap,
-            videoTime: videoTime,
-            audioTime: audioTime,
-            drift: drift,
-            frameIntervalMs: lastFrameInterval,
-            videoAhead: videoAheadSec(),
-            audioAhead: audioAheadSec(),
-          });
-        } catch (eWarn) {}
+        if (playbackDebug) {
+          try {
+            console.warn('[tesla-video output] video frame gap while audio advances', {
+              frameGapMs: frameGap,
+              videoTime: videoTime,
+              audioTime: audioTime,
+              drift: drift,
+              frameIntervalMs: lastFrameInterval,
+              videoAhead: videoAheadSec(),
+              audioAhead: audioAheadSec(),
+            });
+          } catch (eWarn) {}
+        }
       }
     } else if (frameGap >= 0 && frameGap < 400) {
       outputGapSince = 0;
@@ -3385,6 +3827,17 @@
       return heard > 0 && isFinite(heard) ? heard : 0;
     };
     WA.prototype.play = function (rate, left, right) {
+      if (this._capture) {
+        var capDur = left.length / rate;
+        this._capture.push({
+          rate: rate,
+          left: left.slice ? left.slice() : new Float32Array(left),
+          right: right.slice ? right.slice() : new Float32Array(right),
+          mediaAt: audioMediaCursor
+        });
+        audioMediaCursor += capDur;
+        return;
+      }
       // Keep the PCM. Dropping it advances the decoder without anything to
       // play, so the next sound after resume belongs to a later frame.
       if (armingSeam || this._seamHold) {
@@ -4236,6 +4689,246 @@
     if (src.socket) src.socket.onclose = src.__onClose;
   }
 
+  function chunkDur(ch) {
+    if (!ch || !ch.left || !ch.rate) return 0;
+    return ch.left.length / ch.rate;
+  }
+
+  function streamHeardRel() {
+    var heard = playingSoundTime({ fallback: false });
+    if (heard > 0) return heard;
+    if (paused && pauseHeard > 0) return pauseHeard;
+    if (paused && pausePos >= startAt) return Math.max(0, pausePos - startAt);
+    return 0;
+  }
+
+  function bufferCoversSeek(target) {
+    if (!player || !player.video || !player.audio || !player.audioOut) return false;
+    if (!playing || isLive || ended || streamEnded) return false;
+    if (prerolling || rebuffering || recoveringStream || soundResyncing || needStreamRestart) return false;
+    if (!videoStartWall && !stageFrameReady) return false;
+    if (videoFail >= 4) return false;
+    var nowPos = currentPos();
+    var delta = target - nowPos;
+    if (!(delta > 0.2) || delta > BUFFER_SEEK_MAX_SEC) return false;
+    if (!(audioAheadSec() > delta + BUFFER_SEEK_MARGIN_SEC)) return false;
+    if (!(videoAheadSec() > delta + BUFFER_SEEK_MARGIN_SEC)) return false;
+    var vt = player.video.currentTime;
+    var heard = streamHeardRel();
+    if (!isFinite(vt)) return false;
+    if (Math.abs(vt - heard) > 0.55) return false;
+    var decoded = player.audio.currentTime;
+    if (!isFinite(decoded)) return false;
+    if (!paused && Math.abs(decoded - audioMediaCursor) > 1.5) return false;
+    var targetRel = target - startAt;
+    if (!(targetRel > vt + 0.05)) return false;
+    var frames = Math.ceil((targetRel - vt) * (fps || 24));
+    if (frames > 360) return false;
+    return true;
+  }
+
+  function harvestScheduledAudio(out) {
+    var chunks = [];
+    var srcs = (out._srcs || []).slice();
+    out._srcs = [];
+    var now = 0;
+    try { if (out.context) now = out.context.currentTime; } catch (eNow) { now = 0; }
+    var i;
+    for (i = 0; i < srcs.length; i++) {
+      var src = srcs[i];
+      try { src.onended = null; } catch (e0) {}
+      try {
+        var buf = src.buffer;
+        var rate = buf ? buf.sampleRate : 0;
+        var when = src._ctxAt;
+        if (buf && rate > 0 && isFinite(src._mediaAt) && when != null && isFinite(when)) {
+          var skip = now - when;
+          var from = skip > 0 ? Math.floor(skip * rate) : 0;
+          if (from < 0) from = 0;
+          if (from < buf.length) {
+            var left = copyChannel(buf, 0, from);
+            var right = buf.numberOfChannels > 1 ? copyChannel(buf, 1, from) : new Float32Array(left);
+            chunks.push({ rate: rate, left: left, right: right, mediaAt: src._mediaAt + (from / rate) });
+          }
+        }
+      } catch (eCopy) {}
+      try { src.stop(0); } catch (e1) {}
+      try { src.disconnect(); } catch (e2) {}
+    }
+    var parked = out._parked || [];
+    out._parked = [];
+    for (i = 0; i < parked.length; i++) {
+      if (parked[i] && parked[i].left && parked[i].rate) {
+        chunks.push({
+          rate: parked[i].rate,
+          left: parked[i].left,
+          right: parked[i].right || parked[i].left,
+          mediaAt: isFinite(parked[i].mediaAt) ? parked[i].mediaAt : audioMediaCursor
+        });
+      }
+    }
+    var pending = out._pending || [];
+    out._pending = [];
+    var pendAt = audioMediaCursor;
+    if (chunks.length) {
+      var last = chunks[chunks.length - 1];
+      pendAt = last.mediaAt + chunkDur(last);
+    }
+    for (i = 0; i < pending.length; i++) {
+      if (!pending[i] || !pending[i].left || !pending[i].rate) continue;
+      chunks.push({
+        rate: pending[i].rate,
+        left: pending[i].left,
+        right: pending[i].right || pending[i].left,
+        mediaAt: pendAt
+      });
+      pendAt += pending[i].left.length / pending[i].rate;
+    }
+    out.startTime = now;
+    return chunks;
+  }
+
+  function trimChunks(chunks, targetRel) {
+    var kept = [];
+    var i;
+    for (i = 0; i < chunks.length; i++) {
+      var ch = chunks[i];
+      var dur = chunkDur(ch);
+      var start = ch.mediaAt;
+      var end = start + dur;
+      if (!(dur > 0) || !(end > targetRel + 0.001)) continue;
+      if (start >= targetRel - 0.001) {
+        kept.push(ch);
+        continue;
+      }
+      var n = Math.floor((targetRel - start) * ch.rate);
+      if (n < 0) n = 0;
+      if (n >= ch.left.length) continue;
+      kept.push({
+        rate: ch.rate,
+        left: ch.left.subarray(n),
+        right: (ch.right || ch.left).subarray(n),
+        mediaAt: targetRel
+      });
+    }
+    return kept;
+  }
+
+  function chunksContinuous(chunks, from) {
+    var at = from;
+    var i;
+    for (i = 0; i < chunks.length; i++) {
+      if (Math.abs(chunks[i].mediaAt - at) > 0.08) return false;
+      at += chunkDur(chunks[i]);
+    }
+    return true;
+  }
+
+  function chunksSpan(chunks) {
+    var sum = 0;
+    var i;
+    for (i = 0; i < chunks.length; i++) sum += chunkDur(chunks[i]);
+    return sum;
+  }
+
+  function commitBufferSeek(target, kept, wasPaused) {
+    var out = player.audioOut;
+    var targetRel = target - startAt;
+    var now = 0;
+    try { if (out.context) now = out.context.currentTime; } catch (eNow) { now = 0; }
+    audioMediaCursor = targetRel;
+    out._schedEndMedia = targetRel;
+    out._schedEndCtx = now;
+    out.startTime = now;
+    out._capture = null;
+    lastHeard = targetRel;
+    endCoastFrom = 0;
+    seekSettleUntil = Date.now() + 700;
+    videoCatching = false;
+    driftSince = 0;
+    driftAlerted = false;
+    videoLeadSince = 0;
+    videoFail = 0;
+    if (wasPaused) {
+      out._parked = kept;
+      out._pending = [];
+      out._held = true;
+      out.enabled = false;
+      pausePos = target;
+      pauseHeard = targetRel;
+      lastPlaybackPos = target;
+      paused = true;
+    } else {
+      out._parked = [];
+      out._pending = [];
+      out._held = false;
+      out.enabled = true;
+      paused = false;
+      pausePos = -1;
+      var i;
+      for (i = 0; i < kept.length; i++) out.play(kept[i].rate, kept[i].left, kept[i].right);
+      lastPlaybackPos = target;
+    }
+    paintSeekBar();
+    paintPlayButton();
+  }
+
+  function seekInsideBuffer(target) {
+    if (!bufferCoversSeek(target)) {
+      debugPlayback('buffer-seek-skip', {
+        target: target,
+        pos: currentPos(),
+        audioAhead: audioAheadSec(),
+        videoAhead: videoAheadSec(),
+        prerolling: prerolling,
+        videoFail: videoFail
+      });
+      return false;
+    }
+    var out = player.audioOut;
+    var targetRel = target - startAt;
+    var decoded = player.audio.currentTime;
+    var wasPaused = !!paused;
+    var harvested = harvestScheduledAudio(out);
+    var kept = trimChunks(harvested, targetRel);
+    if (targetRel > decoded - 0.02) {
+      out._capture = [];
+      var guard = 0;
+      var t0 = Date.now();
+      var audioOk = false;
+      while (guard < 500 && Date.now() - t0 < 90) {
+        var at = player.audio.currentTime;
+        if (isFinite(at) && at >= targetRel - 0.03) { audioOk = true; break; }
+        if (!player.audio.decode()) break;
+        guard++;
+      }
+      var captured = out._capture || [];
+      out._capture = null;
+      if (!audioOk) return false;
+      var more = trimChunks(captured, targetRel);
+      var i;
+      for (i = 0; i < more.length; i++) kept.push(more[i]);
+    } else {
+      var expect = decoded - targetRel;
+      if (expect > 0.45 && chunksSpan(kept) + 0.35 < expect) return false;
+    }
+    if (kept.length && !chunksContinuous(kept, targetRel)) return false;
+    var v0 = Date.now();
+    var videoOk = false;
+    var vg = 0;
+    while (vg < 400 && Date.now() - v0 < 140) {
+      var vt = player.video.currentTime;
+      if (isFinite(vt) && vt >= targetRel - 0.04) { videoOk = true; break; }
+      if (!player.video.decode()) break;
+      vg++;
+    }
+    if (!videoOk) return false;
+    commitBufferSeek(target, kept, wasPaused);
+    debugPlayback('buffer-seek', { target: target, keptSec: chunksSpan(kept), paused: wasPaused });
+    if (!wasPaused) setStatus('재생');
+    return true;
+  }
+
   function seekTo(sec) {
     if (!playing) return;
     if (membersShownId && membersShownId === videoIdFromSrc(playing)) {
@@ -4250,7 +4943,6 @@
     pendingSeekSec = sec;
     pendingSeekOpts = paused ? { keepPaused: true, skipInfo: true } : { skipInfo: true };
     if ($('npTime') && duration) $('npTime').textContent = fmtPlayClock(sec) + ' / ' + fmtPlayClock(duration);
-    setStatus(sec > 1 ? '지정한 위치로 이동 중...' : '불러오는 중');
     if (seekDebounce) clearTimeout(seekDebounce);
     seekDebounce = setTimeout(function () {
       seekDebounce = null;
@@ -4259,7 +4951,11 @@
       pendingSeekSec = null;
       pendingSeekOpts = null;
       if (t == null || !playing) return;
+      var jumped = false;
+      try { jumped = seekInsideBuffer(t); } catch (eSeek) { jumped = false; }
+      if (jumped) return;
       if (!o.keepPaused) pausePos = -1;
+      setStatus(t > 1 ? '지정한 위치로 이동 중...' : '불러오는 중');
       playUrl(playing, t, o);
     }, 120);
   }
@@ -4997,7 +5693,7 @@
     submitHomeSearch(($('q') && $('q').value) || '');
   };
   bindSearchEnter($('q'), submitHomeSearch);
-  if ($('btnAppHome')) $('btnAppHome').onclick = function () { tv.home(); };
+  if ($('btnAppHome')) $('btnAppHome').onclick = function () { location.href = tv.url('/?stay=1'); };
   if ($('btnYtHome')) $('btnYtHome').onclick = function (e) {
     if (e && e.preventDefault) e.preventDefault();
     goYtHome();
@@ -5533,6 +6229,25 @@
     toggleFav(id);
   };
   if ($('btnSub')) $('btnSub').onclick = function () { toggleSub(); };
+  if ($('btnFeedSub')) $('btnFeedSub').onclick = function () {
+    if (!selectedCh) return;
+    toggleSubChannel(feedSubCh || channelById(selectedCh));
+  };
+  if ($('subsFind')) {
+    $('subsFind').oninput = function () {
+      subsFindQ = this.value.trim();
+      var vis = filteredSubList();
+      renderRail();
+      if (currentFeed !== 'subs') return;
+      if (!vis.length) {
+        if (list) list.innerHTML = '<div class="notice">해당하는 채널이 없습니다</div>';
+        return;
+      }
+      if (!selectedCh || !vis.some(function (ch) { return ch.channel_id === selectedCh; })) {
+        openChannel(vis[0].channel_id);
+      }
+    };
+  }
   if ($('libFilter')) {
     $('libFilter').oninput = function () {
       libFilter = this.value.trim();
@@ -5548,7 +6263,7 @@
         }
         return;
       }
-      if (currentFeed === 'favs' || currentFeed === 'related' || currentFeed === 'search' || currentFeed === 'suggest') applyLibView();
+      if (feedUsesLibView(currentFeed) && currentFeed !== 'subs') applyLibView();
     };
   }
   if ($('libVidFilter')) {
@@ -5563,7 +6278,7 @@
     libSort = s;
     suggestSortSet = true;
     paintSortChips();
-    if (currentFeed === 'favs' || currentFeed === 'subs' || currentFeed === 'related' || currentFeed === 'search' || currentFeed === 'suggest') applyLibView();
+    if (feedUsesLibView(currentFeed)) applyLibView();
   };
   function paintLogoutLabel() {
     var els = document.querySelectorAll('.js-logout');
@@ -5580,6 +6295,11 @@
       favIds = {};
       subIds = {};
       subList = [];
+      subVideoCache = {};
+      subsWarmGen++;
+      subsWarmId = '';
+      subsWarmPaint = null;
+      subsOpen = null;
       libRaw = [];
       lastItems = [];
       selectedCh = '';

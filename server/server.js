@@ -462,11 +462,18 @@ app.get('/api/subscriptions/channel', async function (req, res) {
   const id = String(req.query.id || req.query.channel_id || '');
   const channels = subscriptions.read(pin);
   const ch = channels.filter(function (x) { return x.channel_id === id; })[0];
-  if (!ch) return res.status(404).json({ ok: false, error: '구독하지 않은 채널입니다' });
+  if (!ch) {
+    console.log('[tesla-video subs] 없음 ' + id);
+    return res.status(404).json({ ok: false, error: '구독하지 않은 채널입니다' });
+  }
+  const quick = String(req.query.quick || '') === '1';
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const phase = quick ? '미리받기' : '상세';
+  console.log('[tesla-video subs] ' + phase + ' 시작 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' offset=' + offset);
   try {
-    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const items = await media.youtubeChannelVideos(ch.channel_id, req.query.limit || 16, ch.name, offset, { stamp: false });
-    await media.fillItemStats(items);
+    if (!quick) await media.fillItemStats(items);
+    console.log('[tesla-video subs] ' + phase + ' 완료 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' items=' + ((items && items.length) || 0));
     if (!offset && items && items[0]) {
       subscriptions.patch(pin, ch.channel_id, {
         last_video_id: items[0].id,
@@ -478,8 +485,9 @@ app.get('/api/subscriptions/channel', async function (req, res) {
     const updated = subscriptions.readDecorated(pin).filter(function (x) {
       return x.channel_id === ch.channel_id;
     })[0] || ch;
-    res.json({ ok: true, channel: updated, items: items || [], more: !!(items && items.length >= 8) });
+    res.json({ ok: true, quick: quick, channel: updated, items: items || [], more: !!(items && items.length >= 8) });
   } catch (e) {
+    console.log('[tesla-video subs] ' + phase + ' 실패 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' ' + String((e && e.message) || e).slice(0, 180));
     res.status(500).json({ ok: false, error: e.message.slice(0, 180), items: [] });
   }
 });
@@ -513,55 +521,22 @@ app.get('/api/youtube/home', async function (req, res) {
       await media.fillItemStats(extra);
       return res.json({ ok: true, source: 'more', items: extra || [], more: !!(extra && extra.length >= n) });
     }
-    const pin = sessionPin(req);
-    const channels = pin ? subscriptions.readDecorated(pin) : [];
-    let subItems = [];
-    let extra = [];
-    const tasks = [];
-    tasks.push((async function () {
-      try { extra = await youtubeOauth.mostPopular(n); } catch (e) { extra = null; }
-      if (!extra || !extra.length) {
-        try {
-          extra = await Promise.race([
-            media.youtubeHome(n),
-            new Promise(function (_, rej) { setTimeout(function () { rej(new Error('home timeout')); }, 12000); }),
-          ]);
-        } catch (e2) { extra = []; }
-      }
-      extra = extra || [];
-    })());
-    if (channels.length) {
-      tasks.push((async function () {
-        try { subItems = await media.subscriptionFeed(channels, n); } catch (e) { subItems = []; }
-      })());
+    let items = [];
+    try { items = await youtubeOauth.mostPopular(n); } catch (e) { items = null; }
+    if (!items || !items.length) {
+      try {
+        items = await Promise.race([
+          media.youtubeHome(n),
+          new Promise(function (_, rej) { setTimeout(function () { rej(new Error('home timeout')); }, 12000); }),
+        ]);
+      } catch (e2) { items = []; }
     }
-    await Promise.all(tasks);
-    if (subItems && subItems.length) {
-      const seen = {};
-      const items = [];
-      subItems.forEach(function (it) {
-        if (!it || !it.id || seen[it.id]) return;
-        seen[it.id] = true;
-        items.push(it);
-      });
-      extra.forEach(function (it) {
-        if (!it || !it.id || seen[it.id]) return;
-        seen[it.id] = true;
-        items.push(it);
-      });
-      const page = items.slice(0, n);
-      await media.fillItemStats(page);
-      return res.json({ ok: true, source: 'subs', items: page, more: true });
-    }
-    const items = extra && extra.length ? extra : [];
-    const source = items.length ? 'popular' : 'trending';
+    items = items || [];
     if (!items.length) {
-      const fallback = await media.youtubeHome(n);
-      await media.fillItemStats(fallback);
-      return res.json({ ok: true, source: 'trending', items: fallback || [], more: !!(fallback && fallback.length >= 8) });
+      items = await media.youtubeHome(n);
     }
     await media.fillItemStats(items);
-    res.json({ ok: true, source: source, items: items, more: !!(items && items.length >= 8) });
+    res.json({ ok: true, source: 'popular', items: items || [], more: !!(items && items.length >= 8) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
   }
