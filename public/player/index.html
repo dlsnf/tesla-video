@@ -1,12 +1,35 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
+<script>
+(function () {
+  var token = '';
+  try { token = localStorage.getItem('tv_token') || ''; } catch (e) {}
+  if (!token) {
+    try {
+      var m = String(document.cookie || '').match(/(?:^|; )tv_token=([^;]*)/);
+      if (m) token = decodeURIComponent(m[1] || '');
+    } catch (e2) {}
+  }
+  if (!token) {
+    var q = /(?:^|[?&])token=([^&]*)/.exec(String(location.search || ''));
+    if (q) {
+      try { token = decodeURIComponent(q[1] || ''); } catch (e3) { token = ''; }
+    }
+  }
+  var root = document.documentElement;
+  var extra = 'auth-wait';
+  if (!token) extra += ' need-pin';
+  root.className += (root.className ? ' ' : '') + extra;
+})();
+</script>
+<style>html,body{background:#0f0f0f}html.auth-wait .wrap,html.auth-wait .loading-curtain,html.need-pin .wrap,html.need-pin .loading-curtain{display:none!important}html.auth-wait .pin-mask{display:none!important}html.need-pin .pin-mask{display:flex!important}</style>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>YouTube — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=158">
+<link rel="stylesheet" href="../css/app.css?v=162">
 </head>
 <body>
 <div class="wrap" id="page">
@@ -28,11 +51,10 @@
   </div>
 
   <div class="chips" id="chips">
-    <button class="chip on" data-feed="home">홈</button>
+    <button class="chip on" data-feed="home">추천 영상</button>
     <button class="chip" data-feed="music">음악</button>
     <button class="chip" data-feed="game">게임</button>
     <button class="chip" data-feed="news">뉴스</button>
-    <button class="chip" data-feed="subs">구독</button>
     <button class="chip" data-feed="favs">즐겨찾기</button>
   </div>
 
@@ -48,14 +70,19 @@
     </div>
   </div>
 
-  <div class="stat" id="st">홈 피드를 불러오는 중...</div>
+  <div class="stat" id="st">추천 영상을 불러오는 중...</div>
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
-  <table class="feed-split">
+  <table class="feed-split subs-on">
     <tr>
-      <td class="subs-td" id="subsTd" style="display:none">
+      <td class="subs-td" id="subsTd">
+        <input class="inp subs-find" id="subsFind" placeholder="채널명으로 검색" autocomplete="off" autocorrect="off" spellcheck="false">
         <div class="subs-rail" id="subsRail"></div>
       </td>
       <td class="feed-td">
+        <div class="feed-sub" id="feedSub" style="display:none">
+          <span class="feed-sub-name" id="feedSubName"></span>
+          <button class="sub-btn on" id="btnFeedSub" type="button">구독중</button>
+        </div>
         <div class="yt-grid" id="list"></div>
         <button class="more-bar" id="moreBar" type="button" style="display:none">더 보기</button>
       </td>
@@ -79,7 +106,7 @@
 </div>
 
 <script src="../config.js?v=133"></script>
-<script src="../js/common.js?v=134"></script>
-<script src="../js/player.js?v=253"></script>
+<script src="../js/common.js?v=136"></script>
+<script src="../js/player.js?v=262"></script>
 </body>
 </html>

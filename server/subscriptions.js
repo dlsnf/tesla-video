@@ -75,11 +75,11 @@ function readDecorated(pin) {
   list.forEach(function (ch) {
     ch.watch_count = counts[ch.channel_id] || 0;
   });
+  // watch_count is plays in the last 6 months. Equal counts stay newest-subscription first.
   list.sort(function (a, b) {
     var ac = a.watch_count || 0;
     var bc = b.watch_count || 0;
     if (bc !== ac) return bc - ac;
-    if (ac === 0) return (a.ts || 0) - (b.ts || 0);
     return (b.ts || 0) - (a.ts || 0);
   });
   return list;

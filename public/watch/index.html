@@ -1,12 +1,35 @@
 <!DOCTYPE html>
 <html lang="ko" class="watch-doc">
 <head>
+<script>
+(function () {
+  var token = '';
+  try { token = localStorage.getItem('tv_token') || ''; } catch (e) {}
+  if (!token) {
+    try {
+      var m = String(document.cookie || '').match(/(?:^|; )tv_token=([^;]*)/);
+      if (m) token = decodeURIComponent(m[1] || '');
+    } catch (e2) {}
+  }
+  if (!token) {
+    var q = /(?:^|[?&])token=([^&]*)/.exec(String(location.search || ''));
+    if (q) {
+      try { token = decodeURIComponent(q[1] || ''); } catch (e3) { token = ''; }
+    }
+  }
+  var root = document.documentElement;
+  var extra = 'auth-wait';
+  if (!token) extra += ' need-pin';
+  root.className += (root.className ? ' ' : '') + extra;
+})();
+</script>
+<style>html,body{background:#0f0f0f}html.auth-wait .wrap,html.auth-wait .loading-curtain,html.need-pin .wrap,html.need-pin .loading-curtain{display:none!important}html.auth-wait .pin-mask{display:none!important}html.need-pin .pin-mask{display:flex!important}</style>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=158">
+<link rel="stylesheet" href="../css/app.css?v=162">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -161,7 +184,6 @@
     <button class="chip on" data-feed="suggest" type="button">추천 영상</button>
     <button class="chip" data-feed="related" type="button">채널 영상</button>
     <button class="chip" data-feed="search" type="button">검색</button>
-    <button class="chip" data-feed="subs" type="button">구독</button>
     <button class="chip" data-feed="favs" type="button">즐겨찾기</button>
   </div>
   <div id="watchTabSearch" class="watch-tab-search" style="display:none">
@@ -181,12 +203,17 @@
       <button class="chip" data-sort="dur" type="button">길이</button>
     </div>
   </div>
-  <table class="feed-split watch-feed">
+  <table class="feed-split watch-feed subs-on">
     <tr>
-      <td class="subs-td" id="subsTd" style="display:none">
+      <td class="subs-td" id="subsTd">
+        <input class="inp subs-find" id="subsFind" placeholder="채널명으로 검색" autocomplete="off" autocorrect="off" spellcheck="false">
         <div class="subs-rail" id="subsRail"></div>
       </td>
       <td class="feed-td">
+        <div class="feed-sub" id="feedSub" style="display:none">
+          <span class="feed-sub-name" id="feedSubName"></span>
+          <button class="sub-btn on" id="btnFeedSub" type="button">구독중</button>
+        </div>
         <div class="yt-grid watch-list" id="list"></div>
         <button class="more-bar" id="moreBar" type="button" style="display:none">더 보기</button>
       </td>
@@ -227,8 +254,8 @@
 })();
 </script>
 <script src="../config.js?v=133"></script>
-<script src="../js/common.js?v=134"></script>
+<script src="../js/common.js?v=136"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=253"></script>
+  <script src="../js/player.js?v=262"></script>
 </body>
 </html>

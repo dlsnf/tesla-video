@@ -152,9 +152,33 @@
 
   function home() { w.location.href = url('/') || '/'; }
 
+  function setRootClass(name, on) {
+    var root = document.documentElement;
+    if (!root) return;
+    var parts = String(root.className || '').split(/\s+/);
+    var next = [];
+    var i;
+    for (i = 0; i < parts.length; i++) {
+      if (parts[i] && parts[i] !== name) next.push(parts[i]);
+    }
+    if (on) next.push(name);
+    root.className = next.join(' ');
+  }
+
+  function markNeedPin(on) { setRootClass('need-pin', !!on); }
+
+  function markAuthWait(on) { setRootClass('auth-wait', !!on); }
+
+  function revealApp() {
+    markAuthWait(false);
+    markNeedPin(false);
+  }
+
   function showPin(done) {
     var mask = document.getElementById('pinMask');
-    if (!mask) { if (done) done(); return; }
+    if (!mask) { revealApp(); if (done) done(); return; }
+    markAuthWait(true);
+    markNeedPin(true);
     mask.className = 'pin-mask on';
     var pin = '';
     var dots = document.getElementById('pinDots');
@@ -178,6 +202,7 @@
             if (d.token) setToken(d.token);
             stampLinks();
             mask.className = 'pin-mask';
+            revealApp();
             if (done) done();
           } else {
             pin = '';
@@ -195,12 +220,16 @@
         var t0 = getToken();
         if (t0) setToken(t0);
         stampLinks();
+        revealApp();
         if (done) done();
         return;
       }
       var token = getToken();
-      if (token && data && data.authed) { if (done) done(); return; }
-      if (token && (status === 0 || !data)) { if (done) done(); return; }
+      if (token && (status === 0 || !data)) {
+        revealApp();
+        if (done) done();
+        return;
+      }
       showPin(done);
     });
   }

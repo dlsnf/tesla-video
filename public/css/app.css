@@ -497,7 +497,13 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
 }
 .yt-hint { color: var(--muted); font-size: 0.78rem; margin-left: 8px; vertical-align: middle; }
 .chips { margin: 0 0 18px; padding-bottom: 2px; margin-top:60px;}
-.watch-tab-search { margin: -6px 0 16px; overflow: hidden; padding-top: 2px; max-width: 640px; }
+.chips,
+.lib-tools,
+.watch-tab-search,
+html:not(.watch-doc) .stat {
+  margin-left: 228px;
+}
+.watch-tab-search { margin: -6px 0 16px 228px; overflow: hidden; padding-top: 2px; max-width: 640px; }
 .chip {
   display: inline-block; min-width: 48px; height: 40px; line-height: 40px; padding: 0 14px; margin: 0 8px 8px 0;
   border-radius: 8px; border: 0; background: #272727; color: #f1f1f1;
@@ -716,7 +722,7 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
   min-height: 44px;
   line-height: 44px;
 }
-.lib-tools { margin: 0 0 12px; }
+.lib-tools { margin: 0 0 12px 228px; }
 .lib-tools .inp { width: 100%; flex: none; display: block; margin-bottom: 8px; }
 .lib-sorts { margin: 0; }
 .lib-sorts .chip {
@@ -734,6 +740,23 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
 .watch-feed, .watch-feed .feed-td { min-height: 1000px; }
 .watch-list { min-height: 1000px; }
 .watch-fill { height: 1000px; width: 100%; font-size: 14px; }
+.subs-find { width: 100%; margin: 0 0 8px; }
+.feed-sub {
+  display: flex;
+  align-items: center;
+  margin: 0 0 12px;
+  min-height: 40px;
+}
+.feed-sub-name {
+  flex: 1;
+  min-width: 0;
+  margin-right: 12px;
+  font-weight: 700;
+  font-size: 1.05rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .subs-rail { width: 212px; }
 .sub-ch {
   position: relative;
@@ -779,9 +802,19 @@ body.player-fs .ctrl.fs .fs-exit { display: inline; }
   z-index: 2;
 }
 .sub-ch.on .sub-dot { border-color: #272727; }
-.feed-split.subs-on .yt-card { width: 48%; margin: 0 2% 18px 0; }
-.feed-split.subs-on .yt-card:nth-child(3n) { margin-right: 2%; }
-.feed-split.subs-on .yt-card:nth-child(2n) { margin-right: 0; }
+@media (max-width: 760px) {
+  .feed-split, .feed-split > tbody, .feed-split > tbody > tr, .subs-td, .feed-td {
+    display: block;
+    width: 100%;
+  }
+  .subs-td { padding: 0 0 8px; }
+  .chips,
+  .lib-tools,
+  .watch-tab-search,
+  html:not(.watch-doc) .stat { margin-left: 0; }
+  .subs-rail { width: auto; overflow-x: auto; white-space: nowrap; }
+  .subs-rail .sub-ch { display: inline-block; width: 168px; vertical-align: top; white-space: normal; }
+}
 .more-bar {
   display: block;
   width: 100%;
@@ -872,6 +905,12 @@ body.player-fs .more-bar { display: none; }
   padding: 20px;
 }
 .pin-mask.on { display: flex; }
+html.auth-wait .wrap,
+html.auth-wait .loading-curtain,
+html.need-pin .wrap,
+html.need-pin .loading-curtain { display: none !important; }
+html.auth-wait .pin-mask { display: none !important; }
+html.need-pin .pin-mask { display: flex !important; }
 .pin-box { width: 100%; max-width: 420px; text-align: center; }
 .pin-box h2 { margin-bottom: 8px; }
 .pin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
