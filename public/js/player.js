@@ -187,6 +187,8 @@
   var libFilter = '';
   var libVidFilter = '';
   var libSort = 'new';
+  var suggestSortSet = false;
+  var nextVidBusy = false;
   var libEmpty = '결과 없음';
   var currentPin = '';
   var playbackDebug = !!(window.tv && window.tv.getDebug ? window.tv.getDebug() : /(?:^|[?&])debug=1(?:&|$)/.test(String(window.location.search || '')));
@@ -927,11 +929,11 @@
     var mode = pager.mode;
     pager.busy = true;
     paintMoreBar();
-    var limit = pager.mode === 'related' ? RELATED_PAGE : 16;
+    var limit = (pager.mode === 'related' || pager.mode === 'suggest') ? RELATED_PAGE : 16;
     var done = function (code, data) {
       if (!stillReq(seq) || pager.mode !== mode) return;
       pager.busy = false;
-      var add = uniqueNew((pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search'))) ? libRaw : lastItems, (data && data.items) || []);
+      var add = uniqueNew((pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search' || mode === 'suggest'))) ? libRaw : lastItems, (data && data.items) || []);
       if (!data || !data.ok || !add.length) {
         pager.more = false;
         paintMoreBar();
@@ -939,7 +941,7 @@
       }
       pager.offset += add.length;
       pager.more = data.more !== false && add.length >= 8;
-      if (pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search'))) {
+      if (pager.mode === 'subchannel' || (stage && (mode === 'related' || mode === 'search' || mode === 'suggest'))) {
         libRaw = libRaw.concat(add);
         if (mode === 'search') lastSearchItems = libRaw.slice();
         applyLibView();
@@ -960,6 +962,8 @@
       tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(pager.id) + '&limit=' + limit + '&offset=' + pager.offset, done);
     } else if (pager.mode === 'related') {
       tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + relatedRequestExtra() + '&limit=' + limit + '&offset=' + pager.offset, done);
+    } else if (pager.mode === 'suggest') {
+      tv.get('/api/youtube/suggest?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&limit=' + limit + '&offset=' + pager.offset, done);
     } else {
       pager.busy = false;
       pager.more = false;
@@ -1035,6 +1039,7 @@
       if (lastQuery && !$('qWatchTab').value) $('qWatchTab').value = lastQuery;
       try { $('qWatchTab').focus(); } catch (e) {}
     }
+    paintSortChips();
   }
 
   function renderSkeleton() {
@@ -1056,18 +1061,33 @@
     if ($('libSorts')) $('libSorts').style.display = on ? '' : 'none';
   }
 
+  function paintSortChips() {
+    var box = $('libSorts');
+    if (!box) return;
+    var btns = box.querySelectorAll('[data-sort]');
+    for (var i = 0; i < btns.length; i++) {
+      var s = btns[i].getAttribute('data-sort');
+      if (s === 'rec') btns[i].style.display = currentFeed === 'suggest' ? '' : 'none';
+      btns[i].className = 'chip' + (s === libSort ? ' on' : '');
+    }
+  }
+
+  function ensureSuggestSort() {
+    if (!suggestSortSet) {
+      suggestSortSet = true;
+      libSort = 'rec';
+    }
+    paintSortChips();
+  }
+
   function resetLib() {
     libFilter = '';
     libVidFilter = '';
     libSort = 'new';
+    suggestSortSet = false;
     if ($('libFilter')) $('libFilter').value = '';
     if ($('libVidFilter')) $('libVidFilter').value = '';
-    if ($('libSorts')) {
-      var btns = $('libSorts').querySelectorAll('[data-sort]');
-      for (var i = 0; i < btns.length; i++) {
-        btns[i].className = 'chip' + (btns[i].getAttribute('data-sort') === 'new' ? ' on' : '');
-      }
-    }
+    paintSortChips();
   }
 
   function applyLibView(emptyText) {
@@ -2424,8 +2444,8 @@
       if (nextDue) startNextVideo(false);
     }
     if (watchFromFavs()) {
-      tv.get('/api/favorites', function (code, data) {
-        gotNext(nextFavItem((data && data.ok && data.items) || [], (watchItem && watchItem.id) || ''));
+      tv.get('/api/youtube/suggest?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&pick=next', function (code, data) {
+        gotNext(nextPlayableItem((data && data.ok && data.items) || [], (watchItem && watchItem.id) || ''));
       });
     } else {
       tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + relatedRequestExtra() + '&pick=next&limit=8', function (code, data) {
@@ -2759,23 +2779,36 @@
   }
 
   function showMembersList(seq) {
-    var keepTab = currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs());
-    if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related') {
+    if (currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs())) return;
+    if (watchFromFavs() && currentFeed !== 'related' && currentFeed !== 'suggest') {
       showWatchFavs({ keepSeq: true });
       return;
     }
-    if (keepTab) return;
-    if (watchChannel && watchChannel.channel_id && watchItem) {
-      showRelatedLoading();
-      loadRelated(watchItem.id, watchItem.title || '', seq);
+    if (currentFeed === 'related') {
+      if (watchChannel && watchChannel.channel_id && watchItem) {
+        showRelatedLoading();
+        loadRelated(watchItem.id, watchItem.title || '', seq);
+        return;
+      }
+      setChip('related');
+      showWatchFilters();
+      showSubsRail(false);
+      resetPager('related');
+      if ($('relH')) $('relH').textContent = '이 채널의 다른 영상';
+      if (list) list.innerHTML = '<div class="notice">채널 정보를 찾지 못해 목록을 불러오지 못했습니다</div>';
       return;
     }
-    setChip('related');
+    if (watchItem && watchItem.id) {
+      showSuggestLoading();
+      loadSuggest(watchItem.id, seq);
+      return;
+    }
+    setChip('suggest');
     showWatchFilters();
     showSubsRail(false);
-    resetPager('related');
-    if ($('relH')) $('relH').textContent = '이 채널의 다른 영상';
-    if (list) list.innerHTML = '<div class="notice">채널 정보를 찾지 못해 목록을 불러오지 못했습니다</div>';
+    ensureSuggestSort();
+    if ($('relH')) $('relH').textContent = '추천 영상';
+    if (list) list.innerHTML = '<div class="notice">추천 영상을 불러오지 못했습니다</div>';
   }
 
   // The list already knows this video is members-only. Do not ask /api/media/info or open a stream.
@@ -2963,7 +2996,7 @@
         }
         setStatus((info && info.error) || '영상을 열 수 없습니다. 다른 영상을 선택해 보세요.');
         if ($('npTitle')) $('npTitle').textContent = '재생할 수 없음';
-        if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related') showWatchFavs({ keepSeq: true });
+        if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest') showWatchFavs({ keepSeq: true });
         return;
       }
       duration = info.duration || 0;
@@ -3013,16 +3046,24 @@
       pipeLegacy = useLegacy;
       startPipes(src);
       if (relatedTimer) clearTimeout(relatedTimer);
-      var keepTab = currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs());
-      if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related') {
+      var keepOther = currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs());
+      if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest') {
         showWatchFavs({ keepSeq: true });
-      } else if (!keepTab) {
+      } else if (currentFeed === 'related') {
         showRelatedLoading();
         relatedTimer = setTimeout(function () {
           relatedTimer = null;
           if (!stillReq(playSeq)) return;
-          if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
+          if (currentFeed !== 'related') return;
           loadRelated(info.id, info.title, playSeq);
+        }, 400);
+      } else if (!keepOther) {
+        showSuggestLoading();
+        relatedTimer = setTimeout(function () {
+          relatedTimer = null;
+          if (!stillReq(playSeq)) return;
+          if (currentFeed !== 'suggest') return;
+          loadSuggest(info.id, playSeq);
         }, 400);
       }
     });
@@ -3057,16 +3098,56 @@
     if (list && !list.querySelector('.yt-card')) showRelatedLoading();
     tv.get('/api/youtube/related?id=' + encodeURIComponent(id || '') + relatedRequestExtra() + '&limit=' + RELATED_PAGE, function (code, data) {
       if (!stillReq(seq)) return;
-      if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'favs') return;
+      if (currentFeed !== 'related') return;
       if ($('relH')) $('relH').textContent = (watchChannel && watchChannel.name) ? (watchChannel.name + '의 다른 영상') : '이 채널의 다른 영상';
       if (data && data.ok) {
         libRaw = (data.items || []).slice();
         pager.offset = libRaw.length;
         pager.more = true;
+        applyLibView('채널 영상이 없습니다');
+      } else {
+        libRaw = [];
+        applyLibView('채널 영상을 불러오지 못했습니다');
+      }
+    });
+  }
+
+  function showSuggestLoading() {
+    if (!list || !stage) return;
+    setChip('suggest');
+    showWatchFilters();
+    showSubsRail(false);
+    ensureSuggestSort();
+    if ($('relH')) $('relH').textContent = '추천 영상 불러오는 중...';
+    if (!list.querySelector('.yt-card')) renderSkeleton();
+  }
+
+  function loadSuggest(id, seq) {
+    if (!list) return;
+    if (seq == null) seq = reqSeq;
+    lastChannels = [];
+    setChip('suggest');
+    showWatchFilters();
+    showSubsRail(false);
+    ensureSuggestSort();
+    resetPager('suggest');
+    if ($('relH')) $('relH').textContent = '추천 영상 불러오는 중...';
+    if (list && !list.querySelector('.yt-card')) showSuggestLoading();
+    var vid = id || (watchItem && watchItem.id) || '';
+    tv.get('/api/youtube/suggest?id=' + encodeURIComponent(vid) + '&limit=' + RELATED_PAGE, function (code, data) {
+      if (!stillReq(seq)) return;
+      if (currentFeed !== 'suggest') return;
+      if ($('relH')) $('relH').textContent = '추천 영상';
+      if (data && data.ok) {
+        libRaw = (data.items || []).slice();
+        pager.offset = libRaw.length;
+        pager.more = !!(data.more && libRaw.length);
         applyLibView('추천 영상이 없습니다');
       } else {
         libRaw = [];
-        applyLibView('관련 영상을 불러오지 못했습니다');
+        pager.more = false;
+        paintMoreBar();
+        applyLibView('추천 영상을 불러오지 못했습니다');
       }
     });
   }
@@ -3778,6 +3859,7 @@
   }
 
   function noteVideoFrame() {
+    if (player && player.video) syncVideoAspect(player.video.width, player.video.height);
     var decodeNow = Date.now();
     if (lastVideoDecodeAt) lastFrameInterval = decodeNow - lastVideoDecodeAt;
     if (rebuffering) rebufferVideoDecodeAt = decodeNow;
@@ -4516,7 +4598,10 @@
     if (overlay) cls += ' overlay-on';
     box.className = cls;
     document.body.className = fsOn ? 'player-fs' : '';
+    var touchLayer = $('tapLayer');
+    if (touchLayer) touchLayer.style.touchAction = fsOn ? 'none' : 'pan-y';
     paintFsButton();
+    paintPrevButton();
     fitStage();
     if (stickWatchTop) {
       stickWatchTop = false;
@@ -4525,6 +4610,17 @@
       setTimeout(scrollWatchTop, 80);
       setTimeout(scrollWatchTop, 320);
     }
+  }
+
+  function syncVideoAspect(w, h) {
+    var dw = parseFloat(w) || 0;
+    var dh = parseFloat(h) || 0;
+    if (dw < 16 || dh < 16) return;
+    var ar = dw / dh;
+    if (ar < 0.2 || ar > 4) return;
+    if (Math.abs(ar - videoAr) < 0.02) return;
+    videoAr = ar;
+    fitStage();
   }
 
   function applyInlineAr() {
@@ -4629,6 +4725,73 @@
     requestSoundSync();
   }
 
+  function prevWatchItem() {
+    var curId = (watchItem && watchItem.id) || qsVal('v') || '';
+    var stack = readWatchBack();
+    var i;
+    for (i = stack.length - 1; i >= 0; i--) {
+      var prev = stack[i];
+      if (prev && ((prev.id && prev.id !== curId) || (!prev.id && prev.url))) return prev;
+    }
+    return null;
+  }
+
+  function paintPrevButton() {
+    var btn = $('btnPrevVid');
+    if (!btn) return;
+    var on = !!prevWatchItem();
+    btn.className = on ? 'ctrl' : 'ctrl is-off';
+    btn.setAttribute('aria-disabled', on ? 'false' : 'true');
+  }
+
+  function playPrevVideo() {
+    if (!prevWatchItem()) {
+      paintPrevButton();
+      return;
+    }
+    backWatch();
+  }
+
+  function playNextVideo() {
+    var btn = $('btnNextVid');
+    if (btn && btn.getAttribute('aria-disabled') === 'true') return;
+    if (nextVidBusy) return;
+    var id = (watchItem && watchItem.id) || qsVal('v') || '';
+    if (!id) {
+      setStatus('다음 영상이 없습니다');
+      return;
+    }
+    nextVidBusy = true;
+    setStatus('다음 영상을 불러오는 중...');
+    tv.get('/api/youtube/suggest?id=' + encodeURIComponent(id) + '&pick=next', function (code, data) {
+      nextVidBusy = false;
+      var nowId = (watchItem && watchItem.id) || qsVal('v') || '';
+      if (nowId && nowId !== id) return;
+      var item = nextPlayableItem((data && data.ok && data.items) || [], id);
+      if (!item) {
+        if ($('btnNextVid')) {
+          $('btnNextVid').className = 'ctrl is-off';
+          $('btnNextVid').setAttribute('aria-disabled', 'true');
+        }
+        setStatus('다음 영상이 없습니다');
+        return;
+      }
+      goWatch(item.id, item.url || ('https://www.youtube.com/watch?v=' + item.id), {
+        holdRun: true,
+        keepFs: true,
+        keepFrom: true,
+        members: item.members === true,
+        channelId: item.channel_id || '',
+        channelName: item.uploader || item.channel || '',
+        title: item.title || '',
+        uploaded: item.uploaded || item.ts || 0,
+        thumbnail: item.thumbnail || '',
+        duration: item.duration || 0,
+        views: item.views || 0
+      });
+    });
+  }
+
   function readWatchBack() {
     try { return JSON.parse(sessionStorage.getItem('tv_watch_back') || '[]'); } catch (e) { return []; }
   }
@@ -4660,11 +4823,11 @@
       writeWatchBack([]);
     }
     if (opts.auto) setAutoRunCount(opts.resetRun ? 1 : autoRunCount() + 1);
-    else setAutoRunCount(0);
+    else if (!opts.holdRun) setAutoRunCount(0);
     hideAutoAsk();
     hideRepeatAsk();
     try {
-      if (opts.auto && fsOn) sessionStorage.setItem('tv_fs_keep', '1');
+      if ((opts.auto || opts.keepFs) && fsOn) sessionStorage.setItem('tv_fs_keep', '1');
       else sessionStorage.removeItem('tv_fs_keep');
     } catch (eFsKeep) {}
     if (opts.members && id) {
@@ -4696,10 +4859,14 @@
       prev = null;
     }
     writeWatchBack(stack);
-    stop(false);
+    var stayFs = !!fsOn;
+    stop(stayFs);
     setAutoRunCount(0);
     hideRepeatAsk();
-    try { sessionStorage.removeItem('tv_fs_keep'); } catch (eFsBack) {}
+    try {
+      if (stayFs) sessionStorage.setItem('tv_fs_keep', '1');
+      else sessionStorage.removeItem('tv_fs_keep');
+    } catch (eFsBack) {}
     if (prev && prev.from === 'favs') setWatchFrom('favs');
     else setWatchFrom('');
     var fromQ = prev && prev.from === 'favs' ? '&from=favs' : '';
@@ -5077,17 +5244,19 @@
         return;
       }
       clearPendingTap();
-      if (ady < 50 || ady <= adx) return;
       unlockPlaybackAudio();
-      if (dy < 0 && !fsOn) setFs(true);
-      else if (dy > 0 && fsOn) setFs(false);
+      if (dx > 0 && adx >= 50 && adx > ady && !fsOn) {
+        setFs(true);
+        return;
+      }
+      if (dx < 0 && adx >= 50 && adx > ady && fsOn) setFs(false);
     }
     layer.addEventListener('touchstart', function (e) {
       lastTouchAt = Date.now();
       if (!e.touches || e.touches.length !== 1) { gesture = null; return; }
       var p = pointOf(e);
       gesture = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
-    }, false);
+    }, { passive: true });
     function endTouch(e) {
       lastTouchAt = Date.now();
       if (!gesture) return;
@@ -5104,9 +5273,13 @@
       var p = pointOf(e);
       gesture.x1 = p.x;
       gesture.y1 = p.y;
-    }, false);
+    }, { passive: true });
     layer.addEventListener('touchend', function (e) { endTouch(e); }, false);
-    layer.addEventListener('touchcancel', function (e) { endTouch(e); }, false);
+    layer.addEventListener('touchcancel', function () {
+      lastTouchAt = Date.now();
+      gesture = null;
+      clearPendingTap();
+    }, false);
     layer.onmousedown = function (e) {
       if (Date.now() - lastTouchAt < 700) return;
       if (e.button != null && e.button !== 0) return;
@@ -5143,12 +5316,14 @@
   }
   document.addEventListener('touchstart', function (e) {
     if (chromeControlTarget(e.target)) bumpChrome();
-  }, true);
+  }, { capture: true, passive: true });
   document.addEventListener('mousedown', function (e) {
     if (chromeControlTarget(e.target)) bumpChrome();
   }, true);
   bindTap($('btnBack'), function () { skipSeconds(-10); });
   bindTap($('btnFwd'), function () { skipSeconds(10); });
+  bindTap($('btnPrevVid'), function () { playPrevVideo(); });
+  bindTap($('btnNextVid'), function () { playNextVideo(); });
   if ($('btnFs')) $('btnFs').onclick = function (e) { if (e) e.stopPropagation(); setFs(!fsOn); };
   var lastVol = 100;
   var volTouched = false;
@@ -5373,7 +5548,7 @@
         }
         return;
       }
-      if (currentFeed === 'favs' || currentFeed === 'related' || currentFeed === 'search') applyLibView();
+      if (currentFeed === 'favs' || currentFeed === 'related' || currentFeed === 'search' || currentFeed === 'suggest') applyLibView();
     };
   }
   if ($('libVidFilter')) {
@@ -5386,11 +5561,9 @@
     var s = e.target.getAttribute('data-sort');
     if (!s) return;
     libSort = s;
-    var btns = $('libSorts').querySelectorAll('[data-sort]');
-    for (var i = 0; i < btns.length; i++) {
-      btns[i].className = 'chip' + (btns[i].getAttribute('data-sort') === s ? ' on' : '');
-    }
-    if (currentFeed === 'favs' || currentFeed === 'subs' || currentFeed === 'related' || currentFeed === 'search') applyLibView();
+    suggestSortSet = true;
+    paintSortChips();
+    if (currentFeed === 'favs' || currentFeed === 'subs' || currentFeed === 'related' || currentFeed === 'search' || currentFeed === 'suggest') applyLibView();
   };
   function paintLogoutLabel() {
     var els = document.querySelectorAll('.js-logout');
@@ -5473,6 +5646,16 @@
     search(lastQuery, 'search');
   }
 
+  function openWatchSuggestTab() {
+    setChip('suggest');
+    showWatchFilters();
+    showSubsRail(false);
+    ensureSuggestSort();
+    showSuggestLoading();
+    var id = (watchItem && watchItem.id) || qsVal('v') || (readWatch() && readWatch().v) || '';
+    loadSuggest(id, beginReq());
+  }
+
   function openWatchRelatedTab() {
     setChip('related');
     showWatchFilters();
@@ -5500,7 +5683,8 @@
     if (stage) {
       if (feed !== currentFeed) resetLib();
       keepWatchScroll(function () {
-        if (feed === 'related') openWatchRelatedTab();
+        if (feed === 'suggest') openWatchSuggestTab();
+        else if (feed === 'related') openWatchRelatedTab();
         else if (feed === 'search') openWatchSearchTab();
         else if (feed === 'subs') loadSubs();
         else if (feed === 'favs') showWatchFavs();
@@ -5540,7 +5724,8 @@
       if (qsVal('from') === 'favs') setWatchFrom('favs');
       else if (qsVal('v') || qsVal('url')) setWatchFrom('');
       unlockAudio();
-      setChip(watchFromFavs() ? 'favs' : 'related');
+      setChip(watchFromFavs() ? 'favs' : 'suggest');
+      paintPrevButton();
       var w = readWatch();
       if (w.v) playUrl('https://www.youtube.com/watch?v=' + w.v);
       else if (w.url) playUrl(w.url);

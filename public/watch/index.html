@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=156">
+<link rel="stylesheet" href="../css/app.css?v=158">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -57,6 +57,8 @@
           </button>
           <button class="ctrl" id="btnBack" type="button">-10</button>
           <button class="ctrl" id="btnFwd" type="button">+10</button>
+          <button class="ctrl is-off" id="btnPrevVid" type="button" aria-disabled="true">이전재생</button>
+          <button class="ctrl" id="btnNextVid" type="button">다음재생</button>
           <button class="ctrl icon" id="btnRepeat" type="button" aria-label="반복재생" aria-pressed="false">
             <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
           </button>
@@ -156,7 +158,8 @@
 
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
   <div class="chips" id="chips">
-    <button class="chip on" data-feed="related" type="button">채널 영상</button>
+    <button class="chip on" data-feed="suggest" type="button">추천 영상</button>
+    <button class="chip" data-feed="related" type="button">채널 영상</button>
     <button class="chip" data-feed="search" type="button">검색</button>
     <button class="chip" data-feed="subs" type="button">구독</button>
     <button class="chip" data-feed="favs" type="button">즐겨찾기</button>
@@ -170,6 +173,7 @@
     <input class="inp" id="libFilter" placeholder="채널명으로 검색">
     <input class="inp" id="libVidFilter" placeholder="제목으로 필터" style="display:none">
     <div class="lib-sorts" id="libSorts">
+      <button class="chip" data-sort="rec" type="button" style="display:none">추천순</button>
       <button class="chip on" data-sort="new" type="button">최신순</button>
       <button class="chip" data-sort="old" type="button">오래된</button>
       <button class="chip" data-sort="title" type="button">제목</button>
@@ -225,6 +229,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=134"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=249"></script>
+  <script src="../js/player.js?v=253"></script>
 </body>
 </html>
