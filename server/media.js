@@ -757,9 +757,10 @@ function avatarFromBrowse(json) {
   };
 }
 
-function httpsJson(hostname, path, body, timeoutMs) {
+function httpsJson(hostname, path, body, timeoutMs, maxBytes) {
   return new Promise(function (resolve, reject) {
     const payload = body ? JSON.stringify(body) : '';
+    const cap = maxBytes || 900000;
     const req = https.request({
       hostname: hostname,
       path: path,
@@ -779,7 +780,7 @@ function httpsJson(hostname, path, body, timeoutMs) {
       let size = 0;
       res.on('data', function (c) {
         size += c.length;
-        if (size < 900000) chunks.push(c);
+        if (size < cap) chunks.push(c);
       });
       res.on('end', function () {
         try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
@@ -1567,6 +1568,141 @@ async function nextAutoplayVideo(channelId, vid, currentTs) {
   return wrapped ? [wrapped] : [];
 }
 
+function findChild(node, key, depth) {
+  if (!node || depth > 14) return null;
+  if (Array.isArray(node)) {
+    for (var i = 0; i < node.length; i++) {
+      const hit = findChild(node[i], key, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof node !== 'object') return null;
+  if (Object.prototype.hasOwnProperty.call(node, key) && node[key]) return node[key];
+  const keys = Object.keys(node);
+  for (var j = 0; j < keys.length; j++) {
+    const child = node[keys[j]];
+    if (!child || typeof child !== 'object') continue;
+    const hit2 = findChild(child, key, depth + 1);
+    if (hit2) return hit2;
+  }
+  return null;
+}
+
+function continuationToken(node, depth) {
+  if (!node || depth > 14) return '';
+  if (Array.isArray(node)) {
+    for (var i = 0; i < node.length; i++) {
+      const t = continuationToken(node[i], depth + 1);
+      if (t) return t;
+    }
+    return '';
+  }
+  if (typeof node !== 'object') return '';
+  if (node.continuationCommand && node.continuationCommand.token) return String(node.continuationCommand.token);
+  const keys = Object.keys(node);
+  for (var j = 0; j < keys.length; j++) {
+    const t2 = continuationToken(node[keys[j]], depth + 1);
+    if (t2) return t2;
+  }
+  return '';
+}
+
+function collectSuggestFrom(node) {
+  const acc = { videos: [], channels: [], lockups: [] };
+  walkRenderers(node, acc, 0);
+  return collectInnertubeItems(acc);
+}
+
+function cleanSuggestId(videoId) {
+  return String(videoId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 11);
+}
+
+async function fetchSuggestPage(videoId) {
+  const id = cleanSuggestId(videoId);
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) return { items: [], token: '', done: true };
+  const key = 'suggest2|' + id;
+  const cached = cacheGet(searchCache, key, 10 * 60 * 1000);
+  if (cached) return cached;
+  return once(key, async function () {
+    const json = await httpsJson(
+      'www.youtube.com',
+      '/youtubei/v1/next?prettyPrint=false',
+      { context: innertubeContext(), videoId: id, contentCheckOk: true, racyCheckOk: true },
+      8000,
+      1800000
+    );
+    const secondary = findChild(json, 'secondaryResults', 0) || json;
+    const items = collectSuggestFrom(secondary).filter(function (it) { return it && it.id && it.id !== id; });
+    const out = { items: items, token: continuationToken(secondary, 0), done: false };
+    out.done = !out.token;
+    if (items.length) cacheSet(searchCache, key, out);
+    return out;
+  });
+}
+
+async function ensureSuggest(videoId, need) {
+  const page = await fetchSuggestPage(videoId);
+  const id = cleanSuggestId(videoId);
+  const want = Math.max(0, parseInt(need, 10) || 0);
+  if (!page || page.done || !page.token || (page.items || []).length >= want) return page;
+  const moreKey = 'suggest2more|' + id + '|' + page.items.length;
+  await once(moreKey, async function () {
+    if (page.done || !page.token || page.items.length >= want) return page;
+    const more = await httpsJson(
+      'www.youtube.com',
+      '/youtubei/v1/next?prettyPrint=false',
+      { context: innertubeContext(), continuation: page.token },
+      8000,
+      2500000
+    );
+    const extra = collectSuggestFrom(more).filter(function (it) { return it && it.id && it.id !== id; });
+    const seen = {};
+    page.items.forEach(function (it) { if (it && it.id) seen[it.id] = true; });
+    extra.forEach(function (it) {
+      if (!it || !it.id || seen[it.id]) return;
+      seen[it.id] = true;
+      page.items.push(it);
+    });
+    page.token = continuationToken(more, 0);
+    page.done = !page.token;
+    return page;
+  });
+  return page;
+}
+
+async function youtubeSuggestions(videoId, limit, offset) {
+  const n = Math.min(Math.max(parseInt(limit, 10) || 12, 1), 24);
+  const off = Math.max(0, parseInt(offset, 10) || 0);
+  const page = await ensureSuggest(videoId, off + n);
+  const items = (page && page.items) || [];
+  return {
+    items: items.slice(off, off + n),
+    more: items.length > off + n || !!(page && !page.done && page.token),
+  };
+}
+
+async function nextSuggestedVideo(videoId) {
+  const page = await fetchSuggestPage(videoId);
+  const id = cleanSuggestId(videoId);
+  const rows = (page && page.items) || [];
+  var checked = 0;
+  for (var i = 0; i < rows.length && checked < 16;) {
+    var group = [];
+    while (i < rows.length && group.length < 4 && checked < 16) {
+      var it = rows[i++];
+      if (!it || !it.id || it.id === id) continue;
+      group.push(it);
+      checked += 1;
+    }
+    if (!group.length) break;
+    try { await fillItemStats(group); } catch (e) {}
+    var hit = firstPlayable(group);
+    if (hit) return [hit];
+  }
+  return [];
+}
+
 async function youtubeRelated(id, title, limit, extra) {
   extra = extra || {};
   const n = Math.min(Math.max(parseInt(limit, 10) || 8, 1), 24);
@@ -1808,6 +1944,8 @@ module.exports = {
   searchYoutubeWithChannels,
   youtubeHome,
   youtubeRelated,
+  youtubeSuggestions,
+  nextSuggestedVideo,
   youtubeComments,
   youtubeSubscriptions,
   youtubeChannelVideos,

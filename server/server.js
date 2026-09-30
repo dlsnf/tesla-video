@@ -643,6 +643,20 @@ app.get('/api/youtube/channel', async function (req, res) {
   }
 });
 
+app.get('/api/youtube/suggest', async function (req, res) {
+  try {
+    const id = String(req.query.id || '');
+    const pick = String(req.query.pick || '');
+    const payload = pick === 'next'
+      ? { items: await media.nextSuggestedVideo(id), more: false }
+      : await media.youtubeSuggestions(id, req.query.limit, req.query.offset);
+    await media.fillItemStats(payload.items);
+    res.json({ ok: true, items: payload.items || [], more: !!payload.more });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 180), items: [] });
+  }
+});
+
 app.get('/api/youtube/related', async function (req, res) {
   try {
     const items = await media.youtubeRelated(req.query.id || '', req.query.title || '', req.query.limit, {
