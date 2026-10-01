@@ -135,6 +135,11 @@
     });
   }
   var audioMediaCursor = 0;
+  // Browser reload is not a user gesture. The audio context stays suspended,
+  // so the picture follows this wall clock until samples can really start.
+  var silentClockFrom = 0;
+  var silentClockBase = 0;
+  var releasingSilent = false;
   var videoShownAt = 0;
   var videoFrames = 0;
   var lastVideoDecodeAt = 0;
@@ -2215,10 +2220,57 @@
     } catch (e) { return 0; }
   }
 
+  function audioContextRunning(out) {
+    try {
+      var ctx = out && out.context;
+      if (!ctx && player && player.audioOut) ctx = player.audioOut.context;
+      return !!(ctx && ctx.state === 'running');
+    } catch (e) { return false; }
+  }
+
+  function clearSilentClock() {
+    silentClockFrom = 0;
+    silentClockBase = 0;
+  }
+
+  function armSilentClock(base) {
+    if (audioContextRunning()) return;
+    if (!(base >= 0) || !isFinite(base)) base = 0;
+    silentClockBase = base;
+    silentClockFrom = Date.now();
+    watchAudioContext(player && player.audioOut && player.audioOut.context);
+    debugPlayback('silent-clock', { base: base });
+  }
+
+  function pauseSilentClock() {
+    if (!(silentClockFrom > 0)) return;
+    silentClockBase = silentClockBase + (Date.now() - silentClockFrom) / 1000;
+    silentClockFrom = -1;
+  }
+
+  function resumeSilentClock() {
+    if (silentClockFrom < 0) silentClockFrom = Date.now();
+  }
+
+  function silentHeard() {
+    if (!silentClockFrom || audioContextRunning()) return 0;
+    var t = silentClockBase;
+    if (silentClockFrom > 0 && !paused && !prerolling) t += (Date.now() - silentClockFrom) / 1000;
+    if (!isLive && duration > startAt) {
+      var cap = duration - startAt;
+      if (t > cap) t = cap;
+    }
+    return t > 0 && isFinite(t) ? t : 0;
+  }
+
   function playingSoundTime(opts) {
     var allowFallback = !(opts && opts.fallback === false);
     var heard = speakerHeard();
     if (heard > 0) return rememberHeard(heard);
+    if (!audioContextRunning()) {
+      var coast = silentHeard();
+      if (coast > 0) return coast;
+    }
     if (!allowFallback) return 0;
     if (lastHeard > 0) return lastHeard;
     if (pauseHeard > 0) return pauseHeard;
@@ -3203,6 +3255,7 @@
     forceShortFinish = false;
     updateRepeatButton();
     playing = null;
+    clearSilentClock();
     paused = false;
     pauseWall = 0;
     pausePos = -1;
@@ -3711,6 +3764,7 @@
       if (paused) return;
       var ctx = WA.CachedContext;
       if (ctx.resume) ctx.resume();
+      watchAudioContext(ctx);
       var buf = ctx.createBuffer(1, 1, 22050);
       var src = ctx.createBufferSource();
       src.buffer = buf;
@@ -3750,6 +3804,7 @@
       }
     } catch (e2) {}
     applyPlayerVol();
+    releaseSilentAudio();
   }
 
   function bindSoundUnlock() {
@@ -3947,10 +4002,18 @@
         return;
       }
       if (!this.enabled) return;
+      // start() throws while the context is suspended and must not move the
+      // speaker clock. Keep the PCM until the context is actually running.
+      if (this.context && this.context.state !== 'running') {
+        if (!this._pending) this._pending = [];
+        var heldLeft = left.slice ? left.slice() : new Float32Array(left);
+        var heldRight = right.slice ? right.slice() : new Float32Array(right);
+        this._pending.push({ rate: rate, left: heldLeft, right: heldRight });
+        audioMediaCursor += heldLeft.length / rate;
+        watchAudioContext(this.context);
+        return;
+      }
       this.unlocked = true;
-      try {
-        if (this.context && this.context.state !== 'running' && this.context.resume) this.context.resume();
-      } catch (e) {}
       var ctx = this.context;
       var now = ctx.currentTime;
       if (!(this.startTime > now - 0.004)) this.startTime = now;
@@ -4029,6 +4092,66 @@
     return pending;
   }
 
+  function watchAudioContext(ctx) {
+    if (!ctx || ctx.__tvState) return;
+    try {
+      ctx.__tvState = true;
+      ctx.addEventListener('statechange', function () {
+        if (ctx.state === 'running') releaseSilentAudio();
+      });
+    } catch (e) {}
+  }
+
+  function holdSilentAudio(out) {
+    if (!out || !(silentClockFrom > 0) || paused || prerolling || audioContextRunning(out)) return;
+    var heard = silentHeard();
+    if (!(heard > 0.2)) return;
+    var pend = out._pending || [];
+    var dur = pendingAudioSec(out);
+    if (!pend.length || !(dur > 0)) return;
+    var behind = heard - (audioMediaCursor - dur);
+    var drop = behind - 0.12;
+    if (drop > 0.05) trimPendingAudio(pend, drop);
+  }
+
+  function releaseSilentAudio() {
+    if (releasingSilent) return;
+    if (!(silentClockFrom > 0) || paused || prerolling || !player || !player.audioOut) return;
+    var out = player.audioOut;
+    var ctx = out.context;
+    if (!ctx || ctx.state !== 'running') return;
+    var vt = 0;
+    try {
+      if (player.video && isFinite(player.video.currentTime)) vt = Math.max(0, player.video.currentTime);
+    } catch (eVt) { vt = 0; }
+    var heard = silentHeard();
+    var align = vt > 0.02 ? vt : heard;
+    var pend = out._pending || [];
+    var dur = 0;
+    var i;
+    for (i = 0; i < pend.length; i++) {
+      if (pend[i] && pend[i].left && pend[i].rate) dur += pend[i].left.length / pend[i].rate;
+    }
+    var drop = align - (audioMediaCursor - dur);
+    if (drop > 0.02) trimPendingAudio(pend, drop);
+    out._pending = [];
+    audioMediaCursor = align > 0 ? align : Math.max(0, audioMediaCursor - dur);
+    clearSilentClock();
+    releasingSilent = true;
+    try {
+      var soon = ctx.currentTime + 0.035;
+      if (!(out.startTime > soon)) out.startTime = soon;
+      for (i = 0; i < pend.length; i++) out.play(pend[i].rate, pend[i].left, pend[i].right);
+      videoCatching = true;
+      debugPlayback('silent-clock-release', {
+        align: align,
+        pending: pend.length,
+        videoTime: vt
+      });
+    } catch (eRel) {}
+    releasingSilent = false;
+  }
+
   function failPreroll(msg) {
     if (!prerolling) return;
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
@@ -4088,6 +4211,11 @@
     var i;
     for (i = 0; i < pend.length; i++) {
       out.play(pend[i].rate, pend[i].left, pend[i].right);
+    }
+    if (!audioContextRunning(out)) {
+      var coastBase = 0;
+      if (player && player.video && isFinite(player.video.currentTime)) coastBase = Math.max(0, player.video.currentTime);
+      armSilentClock(coastBase);
     }
     debugPlayback('playback-start', {
       start: startAt,
@@ -4277,14 +4405,18 @@
           return;
         }
       }
+      if (this === player) releaseSilentAudio();
       if (!paused && this.audio && this.audioOut && this.audioOut.enabled) {
+        if (this === player) holdSilentAudio(this.audioOut);
         var queued = queuedAudio(this);
+        if (this === player && !audioContextRunning(this.audioOut)) queued += pendingAudioSec(this.audioOut);
         var queueTarget = resumePending ? 0.15 : AUDIO_QUEUE_SEC;
         var n2 = 0;
         while (queued < queueTarget && n2 < 24) {
           n2++;
           if (!this.audio.decode()) break;
           queued = queuedAudio(this);
+          if (this === player && !audioContextRunning(this.audioOut)) queued += pendingAudioSec(this.audioOut);
         }
       }
       if (this.video && (!isFinite(this.video.currentTime) || this.video.currentTime <= 0.001)) {
@@ -4307,6 +4439,7 @@
     lastNetGrowthAt = Date.now();
     pauseNet0 = -1;
     audioMediaCursor = 0;
+    clearSilentClock();
     videoShownAt = 0;
     videoFrames = 0;
     lastVideoDecodeAt = 0;
@@ -4363,7 +4496,7 @@
         disableWebAssembly: true,
         decodeFirstFrame: true,
         pauseWhenHidden: false,
-        preserveDrawingBuffer: false,
+        preserveDrawingBuffer: true,
         disableWebAudio: false,
         onSourceCompleted: function () {
           if (isLive || nearEnd() || streamEnded) markStreamEnded();
@@ -5190,6 +5323,10 @@
 
   function scheduleHeldAudio(out) {
     if (!out) return;
+    if (out.context && out.context.state !== 'running') {
+      out._held = false;
+      return;
+    }
     var parked = out._parked || [];
     var pending = out._pending || [];
     out._parked = [];
@@ -5302,6 +5439,7 @@
         } catch (e0) { pauseHeard = 0; }
       }
       if (pauseHeard > 0) lastHeard = pauseHeard;
+      pauseSilentClock();
       paused = true;
       pauseWall = Date.now();
       holdPlayback();
@@ -5342,8 +5480,10 @@
         pausePos = -1;
         playUrl(playing, resumeSec2);
       } else {
+        resumeSilentClock();
         videoCatching = true;
         resumePlayback();
+        releaseSilentAudio();
       }
       paintSeekBar();
       setStatus('재생');
