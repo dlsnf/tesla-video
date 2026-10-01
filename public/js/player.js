@@ -44,7 +44,7 @@
   var BUFFER_SEEK_MARGIN_SEC = 1;
   var SEEK_AUDIO_PREROLL_SEC = 3;
   var PREROLL_SEC = 3;
-  var bufTarget = 20;
+  var bufTarget = 30;
   var seamPlayer = null;
   var seamCanvas = null;
   var seamTimer = null;
@@ -213,12 +213,15 @@
   var subsWarmGen = 0;
   var subsWarmId = '';
   var subsWarmPaint = null;
+  var subsWarmHoldLogged = false;
+  var pipePending = false;
   var subsOpen = null;
   var subPriority = 0;
   var subsLoggedDone = '';
   var subsRosterLogged = '';
   var SUBS_WARM_HEAD = 8;
-  var SUBS_WARM_AFTER = 2;
+  // Around the opened channel: next, previous, two ahead, two back.
+  var SUBS_WARM_AROUND = [1, -1, 2, -2];
   var selectedCh = '';
   var feedSubCh = null;
   var restoreCh = '';
@@ -480,8 +483,10 @@
       updateStageLoader(t);
     }
     if (stageRepeat) {
-      stageRepeat.className = repeatMatch ? 'stage-repeat on' : 'stage-repeat';
+      var nextCountdown = !!(repeatMatch && /다음 영상을 재생합니다$/.test(String(t || '')));
+      stageRepeat.className = repeatMatch ? ('stage-repeat on' + (nextCountdown ? ' next' : '')) : 'stage-repeat';
       if (repeatMatch && stageRepeatCount) stageRepeatCount.textContent = repeatMatch[1];
+      stageRepeat.setAttribute('aria-label', nextCountdown ? '다음 영상 재생' : '반복 재생 대기');
     }
     syncCenterIconCover();
     showBotHelp(isBotErr(t));
@@ -1394,15 +1399,23 @@
     return -1;
   }
 
-  // The rail stays on the YouTube screens. Prefetch the top of that rail,
-  // and the opened channel plus the two below it when the channel is past the top.
+  // The rail stays on the YouTube screens. Prefetch the top of that rail.
+  // Opening a channel also prefetches two after it and two before it.
+  function subsAroundIndex(i) {
+    var sel = selectedSubIndex();
+    if (sel < 0 || i === sel) return false;
+    var n;
+    for (n = 0; n < SUBS_WARM_AROUND.length; n++) {
+      if (sel + SUBS_WARM_AROUND[n] === i) return true;
+    }
+    return false;
+  }
+
   function subsWarmTarget(i) {
     if (i < 0 || i >= subList.length) return false;
     if (!(subList[i] && subList[i].channel_id)) return false;
     if (i < SUBS_WARM_HEAD) return true;
-    var sel = selectedSubIndex();
-    if (sel < SUBS_WARM_HEAD) return false;
-    return i >= sel && i <= sel + SUBS_WARM_AFTER;
+    return subsAroundIndex(i);
   }
 
   function subWarmProgress() {
@@ -1575,31 +1588,74 @@
 
   function warmDelay() {
     if (subPriority > 0) return 600;
-    if (playing) return 6000;
+    if (playing) return 2500;
     return 2000;
   }
 
+  // Background channel prefetch shares the network with the stream. Hold it
+  // only until a play or a reloaded seek has about 5 seconds buffered.
+  function playbackNeedsPipe() {
+    if (!playing || ended) return false;
+    if (pipePending) return true;
+    if (!player) return false;
+    var audioAhead = audioAheadSec();
+    var ahead = packedAhead();
+    var remain = remainSec();
+    if (remain <= 0.5 || ahead >= remain - 0.2) return false;
+    if (audioAhead >= 5 || ahead >= 5) return false;
+    return true;
+  }
+
+  function warmBusy(cid) {
+    if (!cid || subVideoCache[cid] || cid === subsWarmId) return true;
+    if (subsOpen && cid === subsOpen.id) return true;
+    if (selectedCh && cid === selectedCh) return true;
+    return false;
+  }
+
   function nextWarmId() {
+    var sel = selectedSubIndex();
+    var n;
     var i;
-    for (i = 0; i < subList.length; i++) {
-      if (!subsWarmTarget(i)) continue;
-      var cid = subList[i].channel_id;
-      if (!cid || subVideoCache[cid] || cid === subsWarmId) continue;
-      if (subsOpen && cid === subsOpen.id) continue;
-      if (selectedCh && cid === selectedCh) continue;
+    var cid;
+    if (sel >= 0) {
+      for (n = 0; n < SUBS_WARM_AROUND.length; n++) {
+        i = sel + SUBS_WARM_AROUND[n];
+        if (i < 0 || i >= subList.length || !subList[i]) continue;
+        cid = subList[i].channel_id;
+        if (warmBusy(cid)) continue;
+        return cid;
+      }
+    }
+    for (i = 0; i < SUBS_WARM_HEAD && i < subList.length; i++) {
+      if (!subList[i]) continue;
+      cid = subList[i].channel_id;
+      if (warmBusy(cid)) continue;
       return cid;
     }
     return '';
   }
 
-  // One channel at a time. The rail is always visible here, so the top of
-  // the rail is prefetched on entry. A channel opened past that top also
-  // prefetches the two channels below it.
+  // One channel at a time. The rail is always visible, so the top of the
+  // rail is prefetched on entry. A selected channel first prefetches the
+  // next, previous, two-ahead, and two-back channels that are not cached.
   function warmOtherChannels() {
     var gen = ++subsWarmGen;
     function step() {
       if (gen !== subsWarmGen) return;
       logSubsRoster();
+      if (playbackNeedsPipe()) {
+        if (!subsWarmHoldLogged) {
+          subsWarmHoldLogged = true;
+          logSubs('미리받기 일시정지 · 재생 버퍼 채우는 중');
+        }
+        setTimeout(step, 600);
+        return;
+      }
+      if (subsWarmHoldLogged) {
+        subsWarmHoldLogged = false;
+        logSubs('미리받기 다시 시작');
+      }
       if (subPriority > 0 || subsWarmId) {
         setTimeout(step, 600);
         return;
@@ -3126,6 +3182,7 @@
     cancelSeam();
     streamGen += 1;
     pipeTok += 1;
+    pipePending = false;
     if (relatedTimer) { clearTimeout(relatedTimer); relatedTimer = null; }
     if (player) { try { player.destroy(); } catch (e) {} player = null; }
     if (na) {
@@ -3369,6 +3426,7 @@
     opts = opts || {};
     var membersKnown = membersHintFor(videoIdFromSrc(src));
     if (membersKnown) {
+      pipePending = false;
       showMembersWatch(src, membersKnown);
       return;
     }
@@ -3392,6 +3450,7 @@
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain on';
     wakeAudio();
     stop(true);
+    pipePending = true;
     if (keepEarlyResume) {
       earlyResumeAt = savedEarlyAt;
       earlyResumeLegacy = savedEarlyLegacy;
@@ -3444,12 +3503,14 @@
     tv.get('/api/media/info?url=' + encodeURIComponent(src) + '&quality=' + quality, function (code, info) {
       if (!stillReq(playSeq)) return;
       if (code === 401) {
+        pipePending = false;
         soundResyncing = false;
         setStatus('PIN이 필요합니다');
         tv.ensurePin(function () { if (stillReq(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
         return;
       }
       if (!info || !info.ok) {
+        pipePending = false;
         if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
         soundResyncing = false;
         if (info && /회원\s*전용|회원전용/.test(String(info.error || ''))) {
@@ -3715,6 +3776,7 @@
   }
 
   function startPipes(src) {
+    pipePending = false;
     // Audio and video must come from the same MPEG-TS timeline.  A separate
     // HTML audio request races the canvas decoder at startup and drifts after
     // a seek or reconnect, especially on the in-car browser.
@@ -6561,7 +6623,7 @@
   });
   bindToggleBtns('.bbtn', 'bbtn', function (el) {
     var n = parseInt(el.getAttribute('data-buf'), 10);
-    bufTarget = (n === 10 || n === 20 || n === 30) ? n : 20;
+    bufTarget = (n === 10 || n === 20 || n === 30) ? n : 30;
     applyStreamHold();
   }, false);
   bindToggleBtns('.abtn', 'abtn', function (el) {
