@@ -236,6 +236,7 @@
   var chAvatarMap = {};
   var hydrateTimer = null;
   var reqSeq = 0;
+  var subFeedGen = 0;
   var subPending = {};
   var subWant = {};
   var subTapAt = {};
@@ -468,6 +469,12 @@
     if (!b) return;
     b.style.display = on ? 'inline-block' : 'none';
   }
+  // Channel-list loads must not replace the playback line or the stage loader.
+  function setListStatus(t) {
+    if (stage && playing) return;
+    setStatus(t);
+  }
+
   function setStatus(t) {
     if (st) {
       st.textContent = t;
@@ -648,12 +655,39 @@
     } catch (e) {}
   }
 
+  function setWatchSub(id) {
+    try {
+      if (id) sessionStorage.setItem('tv_watch_sub', id);
+      else sessionStorage.removeItem('tv_watch_sub');
+    } catch (e) {}
+  }
+
   // A video opened from the favorites tab keeps that list. The address is the
   // source of truth so a refresh does not fall back to the channel list.
   function watchFromFavs() {
     if (qsVal('from') === 'favs') return true;
     if (qsVal('v') || qsVal('url')) return false;
     try { return sessionStorage.getItem('tv_watch_from') === 'favs'; } catch (e) { return false; }
+  }
+
+  // A video opened from a subscribed channel keeps that channel selected.
+  function watchSubChannel() {
+    if (qsVal('from') === 'favs') return '';
+    var q = qsVal('sub');
+    if (q) return q;
+    if (qsVal('v') || qsVal('url') || !stage) return '';
+    try { return sessionStorage.getItem('tv_watch_sub') || ''; } catch (e) { return ''; }
+  }
+
+  function watchOriginQuery(favs, subId) {
+    if (favs) return '&from=favs';
+    if (subId) return '&sub=' + encodeURIComponent(subId);
+    return '';
+  }
+
+  function watchKeepsSubList() {
+    if (!watchSubChannel()) return false;
+    return currentFeed !== 'search' && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'favs';
   }
 
   function historyGet() {
@@ -1075,6 +1109,13 @@
     paintMoreBar();
     hydrateAvatars();
     if (stage && pager.mode === 'search') scrollWatchResults();
+  }
+
+  function clearFeedChips() {
+    var box = $('chips');
+    if (!box) return;
+    var chips = box.querySelectorAll('.chip');
+    for (var i = 0; i < chips.length; i++) chips[i].className = 'chip';
   }
 
   function setChip(feed) {
@@ -1529,7 +1570,7 @@
     libRaw = (items || []).slice();
     pager.offset = libRaw.length;
     pager.more = more !== false && libRaw.length >= 8;
-    setStatus((ch.name || '채널') + ' · ' + libRaw.length + '개');
+    setListStatus((ch.name || '채널') + ' · ' + libRaw.length + '개');
     applyLibView('이 채널에 영상이 없습니다');
     paintMoreBar();
     restorePageScroll(y);
@@ -1694,7 +1735,7 @@
             logSubsEnd('미리받기 실패', nextId, (data && data.error) || '응답 없음');
             if (paint && stillReq(paint.seq) && currentFeed === 'subs' && selectedCh === nextId) {
               subsWarmPaint = null;
-              setStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
+              setListStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
               pager.more = false;
               paintMoreBar();
               if (list) list.innerHTML = '<div class="notice">이 채널의 영상을 가져오지 못했습니다. 다시 눌러 보세요.</div>';
@@ -1708,14 +1749,16 @@
     step();
   }
 
-  function openChannel(id) {
+  function openChannel(id, opts) {
+    opts = opts || {};
     var ch = subChannelById(id);
     if (!ch || !id) return;
     if (currentFeed !== 'subs') resetLib();
     setChip('subs');
     showLibTools(true, 'subs');
     showSubsRail(true);
-    var seq = beginReq();
+    var seq = opts.keepSeq ? reqSeq : beginReq();
+    var feedGen = ++subFeedGen;
     selectedCh = id;
     feedSubCh = ch;
     paintFeedSub();
@@ -1738,11 +1781,11 @@
       subsWarmPaint = { id: id, seq: seq };
       if (subsOpen && subsOpen.id === id) subsOpen.seq = seq;
       logSubs('선택 · 이미 미리받는 중 · ' + subChannelName(id) + ' · ' + id);
-      setStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
+      setListStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
       renderSkeleton();
       return;
     }
-    setStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
+    setListStatus((ch.name || '채널') + ' 영상을 불러오는 중...');
     renderSkeleton();
     logSubsStart('선택', id);
     subPriority++;
@@ -1753,7 +1796,7 @@
       var mine = ticket && ticket.id === id;
       var paintSeq = mine ? ticket.seq : seq;
       if (mine && subsOpen === ticket) subsOpen = null;
-      var live = stillReq(paintSeq) && currentFeed === 'subs' && selectedCh === id;
+      var live = subFeedGen === feedGen && currentFeed === 'subs' && selectedCh === id && (opts.keepSeq || stillReq(paintSeq));
       if (data && data.ok) {
         rememberSubCache(id, data);
         logSubsEnd('선택 완료', id, '영상 ' + ((data.items && data.items.length) || 0) + '개');
@@ -1777,7 +1820,7 @@
         if (currentFeed === 'subs' && !subsOpen) warmOtherChannels();
         return;
       }
-      setStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
+      setListStatus((data && data.error) || '채널 영상을 불러오지 못했습니다');
       pager.more = false;
       paintMoreBar();
       if (list) list.innerHTML = '<div class="notice">이 채널의 영상을 가져오지 못했습니다. 다시 눌러 보세요.</div>';
@@ -3358,6 +3401,7 @@
 
   function showMembersList(seq) {
     if (currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs())) return;
+    if (watchKeepsSubList()) return;
     if (watchFromFavs() && currentFeed !== 'related' && currentFeed !== 'suggest') {
       showWatchFavs({ keepSeq: true });
       return;
@@ -3639,6 +3683,8 @@
           if (currentFeed !== 'related') return;
           loadRelated(info.id, info.title, playSeq);
         }, 400);
+      } else if (watchKeepsSubList()) {
+        // The subscribed channel list is opened once the rail is ready.
       } else if (!keepOther) {
         showSuggestLoading();
         relatedTimer = setTimeout(function () {
@@ -5731,9 +5777,20 @@
     saveBrowseState();
     rememberWatch(id, url);
     var leavingFrom = watchFromFavs() ? 'favs' : '';
+    var leavingSub = watchSubChannel();
     var destFavs = opts.keepFrom ? leavingFrom === 'favs' : currentFeed === 'favs';
-    if (destFavs) setWatchFrom('favs');
-    else setWatchFrom('');
+    var destSub = '';
+    if (!destFavs) {
+      if (opts.keepFrom) destSub = leavingSub;
+      else if (currentFeed === 'subs' && selectedCh) destSub = selectedCh;
+    }
+    if (destFavs) {
+      setWatchFrom('favs');
+      setWatchSub('');
+    } else {
+      setWatchFrom('');
+      setWatchSub(destSub);
+    }
     if (stage) {
       var curId = (watchItem && watchItem.id) || qsVal('v') || '';
       var curUrl = (watchItem && watchItem.url) || qsVal('url') || '';
@@ -5742,7 +5799,7 @@
         var top = stack.length ? stack[stack.length - 1] : null;
         var leavingMembers = (membersShownId && curId && membersShownId === curId) || qsVal('m') === '1';
         var leavingCh = leavingMembers ? ((watchChannel && watchChannel.channel_id) || qsVal('ch') || '') : '';
-        if (!top || top.id !== curId || (!curId && top.url !== curUrl)) stack.push({ id: curId, url: curUrl, from: leavingFrom, members: leavingMembers ? 1 : 0, ch: leavingCh });
+        if (!top || top.id !== curId || (!curId && top.url !== curUrl)) stack.push({ id: curId, url: curUrl, from: leavingFrom, sub: leavingSub, members: leavingMembers ? 1 : 0, ch: leavingCh });
         writeWatchBack(stack);
       }
     } else {
@@ -5773,7 +5830,7 @@
         url: url || ''
       });
     }
-    var fromQ = destFavs ? '&from=favs' : '';
+    var fromQ = watchOriginQuery(destFavs, destSub);
     var membersQ = (opts.members && id) ? membersLinkQuery(opts.channelId || '') : '';
     if (id) location.href = tv.url('/watch/?v=' + encodeURIComponent(id) + fromQ + membersQ);
     else if (url) location.href = tv.url('/watch/?url=' + encodeURIComponent(url) + fromQ);
@@ -5801,9 +5858,14 @@
       if (feedLayerMode === 'open') sessionStorage.setItem('tv_feed_layer', '1');
       else sessionStorage.removeItem('tv_feed_layer');
     } catch (eLayerBack) {}
-    if (prev && prev.from === 'favs') setWatchFrom('favs');
-    else setWatchFrom('');
-    var fromQ = prev && prev.from === 'favs' ? '&from=favs' : '';
+    if (prev && prev.from === 'favs') {
+      setWatchFrom('favs');
+      setWatchSub('');
+    } else {
+      setWatchFrom('');
+      setWatchSub((prev && prev.sub) || '');
+    }
+    var fromQ = watchOriginQuery(!!(prev && prev.from === 'favs'), (prev && prev.from !== 'favs' && prev.sub) || '');
     var membersQ = (prev && prev.members && prev.id) ? membersLinkQuery(prev.ch || '') : '';
     if (prev && prev.id) {
       location.replace(tv.url('/watch/?v=' + encodeURIComponent(prev.id) + fromQ + membersQ));
@@ -5943,7 +6005,7 @@
     unlockPlaybackAudio();
     try { sessionStorage.removeItem('tv_fs_keep'); } catch (eFsReload) {}
     try { sessionStorage.removeItem('tv_feed_layer'); } catch (eLayerReload) {}
-    var fromQ = watchFromFavs() ? '&from=favs' : '';
+    var fromQ = watchOriginQuery(watchFromFavs(), watchFromFavs() ? '' : watchSubChannel());
     var membersOn = (membersShownId && id && membersShownId === id) || qsVal('m') === '1' || !!membersHintFor(id);
     var membersQ = membersOn ? membersLinkQuery((watchChannel && watchChannel.channel_id) || qsVal('ch') || '') : '';
     if (id) {
@@ -6992,6 +7054,34 @@
     search(lastQuery, 'search');
   }
 
+  function revealSelectedChannel() {
+    var rail = $('subsRail');
+    if (!rail || !rail.getBoundingClientRect) return;
+    var on = rail.querySelector('.sub-ch.on');
+    if (!on || !on.getBoundingClientRect) return;
+    var railRect = rail.getBoundingClientRect();
+    var onRect = on.getBoundingClientRect();
+    if (onRect.top < railRect.top) rail.scrollTop -= railRect.top - onRect.top;
+    else if (onRect.bottom > railRect.bottom) rail.scrollTop += onRect.bottom - railRect.bottom;
+    if (onRect.left < railRect.left) rail.scrollLeft -= railRect.left - onRect.left;
+    else if (onRect.right > railRect.right) rail.scrollLeft += onRect.right - railRect.right;
+  }
+
+  function openWatchSourceChannel() {
+    if (!stage) return;
+    var id = watchSubChannel();
+    if (!id) return;
+    if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs' || currentFeed === 'subs') return;
+    if (!subChannelById(id)) {
+      setChip('suggest');
+      var vid = (watchItem && watchItem.id) || qsVal('v') || '';
+      if (vid) loadSuggest(vid, reqSeq);
+      return;
+    }
+    openChannel(id, { keepSeq: true });
+    revealSelectedChannel();
+  }
+
   function openWatchSuggestTab() {
     setChip('suggest');
     showWatchFilters();
@@ -7068,12 +7158,26 @@
     });
     loadServerHistory();
     loadFavMap();
-    loadSubMap();
+    loadSubMap(function () {
+      if (stage) openWatchSourceChannel();
+    });
     if (stage) {
-      if (qsVal('from') === 'favs') setWatchFrom('favs');
-      else if (qsVal('v') || qsVal('url')) setWatchFrom('');
+      if (qsVal('from') === 'favs') {
+        setWatchFrom('favs');
+        setWatchSub('');
+      } else if (qsVal('sub')) {
+        setWatchFrom('');
+        setWatchSub(qsVal('sub'));
+      } else if (qsVal('v') || qsVal('url')) {
+        setWatchFrom('');
+        setWatchSub('');
+      }
       unlockAudio();
-      setChip(watchFromFavs() ? 'favs' : 'suggest');
+      if (watchFromFavs()) setChip('favs');
+      else if (watchSubChannel()) {
+        clearFeedChips();
+        if (currentFeed !== 'subs' && list && !list.querySelector('.yt-card')) renderSkeleton();
+      } else setChip('suggest');
       paintPrevButton();
       var w = readWatch();
       if (w.v) playUrl('https://www.youtube.com/watch?v=' + w.v);
