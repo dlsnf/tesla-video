@@ -394,6 +394,17 @@ function allowedPlayInput(input) {
   }
 }
 
+function scaledVideoBitrate(quality, low, requestedScale) {
+  const base = media.bitrateForQuality(quality, low);
+  const baseKbps = parseFloat(String(base || ''));
+  const requested = Number(requestedScale);
+  const scale = Number.isFinite(requested) && requested > 0
+    ? Math.max(0.6, Math.min(1, requested))
+    : 1;
+  if (!Number.isFinite(baseKbps) || baseKbps <= 0 || scale >= 1) return base;
+  return Math.max(100, Math.round(baseKbps * scale)) + 'k';
+}
+
 function attachWsStream(ws, input, quality, start, extra) {
   if (!allowedPlayInput(input)) {
     sendJson(ws, { type: 'error', message: 'YouTube/Twitch 주소만 재생할 수 있습니다' });
@@ -406,7 +417,15 @@ function attachWsStream(ws, input, quality, start, extra) {
       if (classified && classified.id) media.invalidateSource(classified.id);
     } catch (eRefresh) {}
   }
-  evictAllVideo();
+  if (extra && extra.parallel) {
+    if (activeCount() >= 2) {
+      sendJson(ws, { type: 'error', message: '동시 영상 스트림 한도에 도달했습니다' });
+      ws.close();
+      return;
+    }
+  } else {
+    evictAllVideo();
+  }
 
   let ffmpeg = null;
   let closed = false;
@@ -472,7 +491,7 @@ function attachWsStream(ws, input, quality, start, extra) {
     sendJson(ws, { type: 'meta', title: info.title, duration: info.duration, isLive: info.isLive, id: info.id });
     sendStatus(ws, parseStart(start) > 2 ? '지정한 위치부터 받는 중...' : 'MPEG1 스트림 시작...');
     info.fps = extra && extra.fps === 30 ? 30 : 24;
-    info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
+    info.bitrate = scaledVideoBitrate(quality, !!(extra && extra.low), extra && extra.videoScale);
     var encodeAttempt = 0;
     ffmpeg = startVideo(info, start, { format: extra && extra.format, legacySeek: legacySeek });
     slot.kill = function () { killProc(ffmpeg); };
@@ -553,6 +572,7 @@ function attachWsStream(ws, input, quality, start, extra) {
             type: 'stream-debug',
             start: parseStart(start),
             requestedQuality: Number(quality) || 480,
+            videoScale: Number(extra && extra.videoScale) || 1,
             sourceHeight: info.sourceHeight || 0,
             output: info.scale || '',
             bitrate: info.bitrate || '',
@@ -648,7 +668,7 @@ function attachWsStream(ws, input, quality, start, extra) {
             if (closed) return;
             info = fresh;
             info.fps = extra && extra.fps === 30 ? 30 : 24;
-            info.bitrate = media.bitrateForQuality(quality, !!(extra && extra.low));
+            info.bitrate = scaledVideoBitrate(quality, !!(extra && extra.low), extra && extra.videoScale);
             mpegSent = 0;
             errBuf = '';
             sourceRejectedSeen = false;

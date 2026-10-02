@@ -352,14 +352,14 @@ app.get('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
   const saved = prefs.read(pin);
-  res.json({ ok: true, pin: pin, autoplayNext: saved.autoplayNext, volume: saved.volume });
+  res.json({ ok: true, pin: pin, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
 });
 
 app.post('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
   const saved = prefs.write(pin, req.body || {});
-  res.json({ ok: true, autoplayNext: saved.autoplayNext, volume: saved.volume });
+  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
 });
 
 app.get('/api/favorites', async function (req, res) {
@@ -834,15 +834,17 @@ wss.on('connection', function (ws, req, parsed) {
   const start = stream.parseStart(parsed.query.start);
   const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
   const low = parsed.query.vbr === 'low';
+  const videoScale = parseFloat(parsed.query.vscale);
   const format = parsed.query.format || '';
   const refresh = parsed.query.refresh === '1';
   const legacySeek = parsed.query.legacy === '1';
+  const parallel = parsed.query.parallel === '1';
   if (!input) {
     ws.send(JSON.stringify({ type: 'error', message: 'url/channel 이 필요합니다' }));
     ws.close();
     return;
   }
-  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, format: format, refresh: refresh, legacySeek: legacySeek });
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, videoScale: videoScale, format: format, refresh: refresh, legacySeek: legacySeek, parallel: parallel });
   keepSessionAlive(req, ws);
 });
 

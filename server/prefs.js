@@ -20,11 +20,12 @@ function clampVolume(v) {
 }
 
 function read(pin) {
-  var prefs = { autoplayNext: false, volume: 100 };
+  var prefs = { autoplayNext: false, autoQuality: true, volume: 100 };
   if (!favorites.validPin(pin)) return prefs;
   try {
     var raw = JSON.parse(fs.readFileSync(fileFor(pin), 'utf8'));
     if (raw && raw.autoplayNext) prefs.autoplayNext = true;
+    if (raw && raw.autoQuality === false) prefs.autoQuality = false;
     var volume = raw && clampVolume(raw.volume);
     if (volume != null) prefs.volume = volume;
   } catch (e) {}
@@ -35,6 +36,7 @@ function write(pin, body) {
   var prefs = read(pin);
   if (!favorites.validPin(pin)) return prefs;
   if (body && Object.prototype.hasOwnProperty.call(body, 'autoplayNext')) prefs.autoplayNext = !!body.autoplayNext;
+  if (body && Object.prototype.hasOwnProperty.call(body, 'autoQuality')) prefs.autoQuality = !!body.autoQuality;
   if (body && body.volume != null && body.volume !== '') {
     var volume = clampVolume(body.volume);
     if (volume != null) prefs.volume = volume;

@@ -296,12 +296,12 @@ function bitrateForQuality(quality, low) {
   const q = parseInt(quality, 10) || 360;
   if (low) {
     if (q <= 360) return '400k';
-    if (q <= 480) return '1100k';
-    return '1800k';
+    if (q <= 480) return '600k';
+    return '1500k';
   }
   if (q <= 360) return '600k';
-  if (q <= 480) return '1800k';
-  return '3000k';
+  if (q <= 480) return '1100k';
+  return '2000k';
 }
 
 function cacheGet(map, key, ttl) {
