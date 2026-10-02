@@ -25,6 +25,7 @@
   var preservedStageFrame = '';
   var stageFrameReady = false, stagePrerollReady = false;
   var duration = 0, isLive = false, fpsCount = 0, lastFps = 0;
+  var durationSource = '';
   var bufEnd = 0;
   var paused = false, tickTimer = null, syncTimer = null, forceTimer = null, audioTimer = null;
   var pausePos = -1;
@@ -39,7 +40,7 @@
   var resumeSyncTimer = null;
   // Keep enough real audio cushion to absorb transport jitter without letting
   // a long scheduled queue make video recovery visibly late.
-  var AUDIO_QUEUE_SEC = 2.5;
+  var AUDIO_QUEUE_SEC = 3.5;
   var AUDIO_CUT_FADE_SEC = 0.008;
   var BUFFER_SEEK_MAX_SEC = 12;
   var BUFFER_SEEK_MARGIN_SEC = 1;
@@ -52,10 +53,19 @@
   var AUTO_REBUFFER_WINDOW_MS = 30000;
   var AUTO_REBUFFER_TRIGGER_COUNT = 2;
   var AUTO_VIDEO_SCALE_STEPS = [1, 0.75, 0.6];
-  var AUTO_VIDEO_RESTORE_BUFFER_SEC = 10;
-  var AUTO_VIDEO_RESTORE_STABLE_MS = 15000;
-  var AUTO_VIDEO_RESTORE_QUIET_MS = 60000;
+  var AUTO_VIDEO_RESTORE_BUFFER_SEC = 8;
+  var AUTO_VIDEO_RESTORE_STABLE_MS = 30000;
+  var AUTO_VIDEO_RESTORE_QUIET_MS = 45000;
   var AUTO_VIDEO_USER_IGNORE_MS = 8000;
+  var AUTO_VIDEO_PRESSURE_EARLY_SEC = 10;
+  var AUTO_VIDEO_PRESSURE_CRITICAL_SEC = 3;
+  var AUTO_VIDEO_PRESSURE_SAMPLE_MS = 1000;
+  var AUTO_VIDEO_PRESSURE_TREND_SEC_PER_SEC = 1;
+  var AUTO_VIDEO_PRESSURE_EMERGENCY_AUDIO_SEC = 1;
+  var AUTO_VIDEO_PRESSURE_EMERGENCY_TIME_TO_EMPTY_SEC = 1;
+  var AUTO_VIDEO_PRESSURE_HOLD_MS = 1200;
+  var AUTO_VIDEO_PRESSURE_CRITICAL_HOLD_MS = 500;
+  var AUTO_VIDEO_DOWNSHIFT_COOLDOWN_MS = 15000;
   var bufTarget = 30;
   var seamPlayer = null;
   var seamCanvas = null;
@@ -67,6 +77,7 @@
   var seamReady = false;
   var seamHasFrame = false;
   var seamStarted = 0;
+  var seamTriggerReason = '';
   var seamLegacy = false;
   var armingSeam = false;
   var VIDEO_CATCH_FRAMES = 2;
@@ -98,7 +109,7 @@
   var repeatHeld = false;
   var autoplayNext = false;
   var autoplayLoaded = false;
-  var autoQuality = true;
+  var autoQuality = false;
   var autoQualityLoaded = false;
   var autoQualityTouched = false;
   var autoQualityUpSince = 0;
@@ -107,19 +118,22 @@
   var autoQualityCooldownUntil = 0;
   var autoQualityLastSwitchAt = 0;
   var autoQualityDebugAt = {};
-  var AUTO_QUALITY_UP_BUFFER_SEC = 20;
-  var AUTO_QUALITY_UP_STABLE_MS = 5000;
+  var AUTO_QUALITY_UP_BUFFER_SEC = 20; //버퍼 20초 이상이면 화질 업그레이드
+  var AUTO_QUALITY_UP_STABLE_MS = 8000; //버퍼 상향 조건을 8초 이상 유지 화질 업그레이드
   var AUTO_QUALITY_DOWN_BUFFER_SEC = 15;
   var AUTO_QUALITY_DOWN_EMERGENCY_SEC = 10;
   var AUTO_QUALITY_DOWN_TREND_SEC = 3000;
   var AUTO_QUALITY_HYSTERESIS_SEC = 5;
   var AUTO_QUALITY_RECOVERY_QUIET_MS = 5000;
-  var AUTO_QUALITY_CANDIDATE_TIMEOUT_MS = 8000;
+  var AUTO_QUALITY_CANDIDATE_TIMEOUT_MS = 12000;
+  var SEAM_JOIN_AUDIO_READY_SEC = 2.5;
   var endMode = '';
   var nextToken = 0;
   var nextItem = null;
   var nextDue = false;
   var nextReady = false;
+  var nextLookupRestorePlayback = false;
+  var nextLookupPauseOverridden = false;
   var repeatTimer = null;
   var repeatAt = 0;
   var endCoastFrom = 0;
@@ -196,7 +210,7 @@
     var pin = currentPin;
     if (!pin) {
       autoplayNext = false;
-      autoQuality = true;
+      autoQuality = false;
       autoQualityLoaded = true;
       paintAutoplayButton();
       paintAutoQualityButton();
@@ -207,7 +221,7 @@
       if (pin !== currentPin || autoplayLoaded) return;
       autoplayLoaded = true;
       autoplayNext = !!(d && d.ok && d.autoplayNext);
-      if (!autoQualityTouched) autoQuality = !(d && d.ok && d.autoQuality === false);
+      if (!autoQualityTouched) autoQuality = !!(d && d.ok && d.autoQuality === true);
       autoQualityLoaded = true;
       paintAutoplayButton();
       paintAutoQualityButton();
@@ -245,6 +259,7 @@
   var seekDebounce = null;
   var pendingSeekSec = null;
   var pendingSeekOpts = null;
+  var pendingSeekRatio = null;
   var seekSettleUntil = 0;
   var streamRetry = 0;
   var streamGen = 0;
@@ -320,9 +335,16 @@
   var adaptiveRebufferTimes = [];
   var adaptiveLastRebufferAt = 0;
   var adaptiveIgnoreUntil = 0;
+  var adaptiveWarmupUntil = 0;
   var adaptiveManualRestart = false;
   var adaptiveStableSince = 0;
   var adaptiveRestoreAttemptAt = 0;
+  var adaptivePressureSince = 0;
+  var adaptivePressureSampleAt = 0;
+  var adaptivePressureSampleBuffer = 0;
+  var adaptivePressureSampleAudioBuffer = 0;
+  var adaptiveEmergencyWaitLogged = false;
+  var adaptiveLastScaleChangeAt = 0;
   var subsOpen = null;
   var subPriority = 0;
   var subsLoggedDone = '';
@@ -623,7 +645,7 @@
   function updateStageLoader(status) {
     var stageLoader = $('stageLoader');
     if (!stageLoader) return;
-    var loading = /지정한 위치로 이동 중|불러오는 중/.test(String(status || ''));
+    var loading = nextVidBusy || /지정한 위치로 이동 중|불러오는 중/.test(String(status || ''));
     var waitingForPlayback = !!player && (!stageFrameReady || !stagePrerollReady);
     stageLoader.className = loading || waitingForPlayback ? 'stage-loader on' : 'stage-loader';
     syncCenterIconCover();
@@ -2938,7 +2960,7 @@
       legacy: useLegacy
     });
     recoveringStream = true;
-    if (beginSeamlessReconnect(useLegacy)) return true;
+    if (beginSeamlessReconnect(useLegacy, null, false, null, 'unfinished-title')) return true;
     var gen = streamGen;
     var resumeAtSec = at;
     setStatus(resumeAtSec > 1 ? '끊긴 위치부터 다시 받는 중...' : '불러오는 중');
@@ -3070,6 +3092,82 @@
     return null;
   }
 
+  function fetchNextSubscriptionItem(channelId, currentId, done, offset, currentUploaded) {
+    offset = Number(offset) || 0;
+    var pageSize = 40;
+    currentUploaded = Number(currentUploaded) || 0;
+    if (offset > 400 && !currentUploaded) { done(null); return; }
+    if (!offset) {
+      var cached = subVideoCache[channelId];
+      var cachedItems = cached && cached.ok && cached.items ? cached.items : [];
+      var cachedCurrentIndex = -1;
+      for (var c = 0; c < cachedItems.length; c++) {
+        if (cachedItems[c] && cachedItems[c].id === currentId) { cachedCurrentIndex = c; break; }
+      }
+      if (cachedCurrentIndex >= 0) {
+        for (var n = cachedCurrentIndex + 1; n < cachedItems.length; n++) {
+          if (cachedItems[n] && cachedItems[n].id && cachedItems[n].members !== true) {
+            done(cachedItems[n]);
+            return;
+          }
+        }
+        offset = cachedItems.length;
+      }
+    }
+    tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(channelId)
+      + '&limit=' + pageSize + '&offset=' + offset + '&quick=1', function (code, data) {
+      if (!data || !data.ok || !data.items) { done(null); return; }
+      var items = data.items;
+      var currentIndex = -1;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].id === currentId) { currentIndex = i; break; }
+      }
+      if (currentIndex >= 0) {
+        for (var j = currentIndex + 1; j < items.length; j++) {
+          if (items[j] && items[j].id && items[j].members !== true) {
+            done(items[j]);
+            return;
+          }
+        }
+      }
+      if (items.length >= pageSize) {
+        var oldest = items[items.length - 1];
+        var oldestUploaded = Number(oldest && (oldest.uploaded || oldest.ts)) || 0;
+        if (currentUploaded && oldestUploaded && oldestUploaded < currentUploaded) {
+          done(null);
+          return;
+        }
+        fetchNextSubscriptionItem(channelId, currentId, done, offset + items.length, currentUploaded);
+        return;
+      }
+      done(null);
+    });
+  }
+
+  function fetchNextPlaybackItem(done) {
+    var currentId = (watchItem && watchItem.id) || qsVal('v') || '';
+    var subChannelId = watchSubChannel();
+    var videoChannelId = watchItem && watchItem.channel_id;
+    if (subChannelId && (!videoChannelId || videoChannelId === subChannelId)) {
+      subPriority++;
+      fetchNextSubscriptionItem(subChannelId, currentId, function (item) {
+        if (subPriority > 0) subPriority--;
+        done(item);
+      }, 0, watchItem && watchItem.uploaded);
+      return;
+    }
+    tv.get('/api/youtube/suggest?id=' + encodeURIComponent(currentId) + '&pick=next', function (code, data) {
+      done(nextPlayableItem((data && data.ok && data.items) || [], currentId));
+    });
+  }
+
+  function nextItemKeepsSubscriptionOrigin(item) {
+    var subChannelId = watchSubChannel();
+    var videoChannelId = watchItem && watchItem.channel_id;
+    return !!(subChannelId && item && item.channel_id === subChannelId
+      && (!videoChannelId || videoChannelId === subChannelId));
+  }
+
   function nextFavItem(items, currentId) {
     var rows = favsNewest(items);
     if (rows.length < 2) return null;
@@ -3184,8 +3282,10 @@
       setStatus('종료');
       return;
     }
+    var keepSubscriptionOrigin = nextItemKeepsSubscriptionOrigin(item);
     goWatch(item.id, item.url, {
       keepFrom: true,
+      clearOrigin: !keepSubscriptionOrigin,
       auto: true,
       resetRun: !!confirmed,
       members: !!item.members,
@@ -3223,15 +3323,7 @@
       }
       if (nextDue) startNextVideo(false);
     }
-    if (watchFromFavs()) {
-      tv.get('/api/youtube/suggest?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + '&pick=next', function (code, data) {
-        gotNext(nextPlayableItem((data && data.ok && data.items) || [], (watchItem && watchItem.id) || ''));
-      });
-    } else {
-      tv.get('/api/youtube/related?id=' + encodeURIComponent((watchItem && watchItem.id) || '') + relatedRequestExtra() + '&pick=next&limit=8', function (code, data) {
-        gotNext(nextPlayableItem((data && data.ok && data.items) || [], (watchItem && watchItem.id) || ''));
-      });
-    }
+    fetchNextPlaybackItem(gotNext);
     if (limited) return;
     repeatTimer = setTimeout(function () {
       repeatTimer = null;
@@ -3422,14 +3514,35 @@
     var seek = $('seek');
     var wrap = $('seekWrap');
     if (!seek) return;
-    if (isLive || !duration) {
+    if (isLive) {
       if (wrap) wrap.style.display = 'none';
       seek.style.display = 'none';
+      seek.disabled = true;
+      if ($('seekKnob')) $('seekKnob').style.display = 'none';
       bufEnd = 0;
       return;
     }
     if (wrap) wrap.style.display = 'block';
     seek.style.display = 'block';
+    if (!duration) {
+      seek.disabled = false;
+      seek.min = '0';
+      seek.max = '1000';
+      var pendingRatio = pendingSeekRatio == null ? 0 : pendingSeekRatio;
+      seek.value = String(Math.round(pendingRatio * 1000));
+      if ($('seekPlay')) $('seekPlay').style.width = (pendingRatio * 100) + '%';
+      if ($('seekBuf')) {
+        $('seekBuf').style.left = (pendingRatio * 100) + '%';
+        $('seekBuf').style.width = '0%';
+      }
+      if ($('seekKnob')) {
+        $('seekKnob').style.display = '';
+        $('seekKnob').style.left = (pendingRatio * 100) + '%';
+      }
+      return;
+    }
+    seek.disabled = false;
+    if ($('seekKnob')) $('seekKnob').style.display = '';
     var pos = currentPos();
     if (pos < 0) pos = 0;
     if (pos > duration) pos = duration;
@@ -3628,6 +3741,7 @@
     ended = false;
     isLive = false;
     duration = 0;
+    durationSource = '';
     videoStartWall = 0;
     videoAr = 16 / 9;
     startAt = 0;
@@ -3708,10 +3822,11 @@
       repeatRunCount = 0;
       repeatHeld = false;
     }
+    pendingSeekRatio = null;
     if (!opts.recovery) prerollRecoveryCount = 0;
     var playSeq = beginReq();
     var keepPaused = !!opts.keepPaused;
-    var skipInfo = !!opts.skipInfo && duration > 0 && sameWatch(src);
+    var skipInfo = !!opts.skipInfo && duration > 0 && durationSource === src && sameWatch(src);
     preservedStageFrame = '';
     var keepEarlyResume = !!opts.keepEarlyResume;
     var savedEarlyAt = earlyResumeAt;
@@ -3729,6 +3844,12 @@
     startAt = seek || 0;
     lastPlaybackPos = startAt;
     bufEnd = startAt;
+    if (durationSource !== src) {
+      duration = 0;
+      durationSource = '';
+      isLive = false;
+    }
+    paintSeekBar();
     showSeekBuf(startAt, 0);
     if (keepPaused) {
       paused = true;
@@ -3798,8 +3919,17 @@
         if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest') showWatchFavs({ keepSeq: true });
         return;
       }
+      durationSource = src;
       duration = info.duration || 0;
       isLive = !!info.isLive;
+      if (pendingSeekRatio != null) {
+        if (!isLive && duration > 0) {
+          startAt = Math.min(Math.max(0, duration - 2), duration * pendingSeekRatio);
+          lastPlaybackPos = startAt;
+          bufEnd = startAt;
+        }
+        pendingSeekRatio = null;
+      }
       videoAr = (info.aspect > 0.1) ? info.aspect : ((info.width && info.height) ? (info.width / info.height) : (16 / 9));
       if (info.width && info.height) {
         stage.width = info.width;
@@ -4146,6 +4276,7 @@
       if (isLive || !duration) {
         if ($('npTime')) $('npTime').textContent = isLive ? 'LIVE' : tv.fmtDur(currentPos());
         if ($('seekWrap') && !paused) $('seekWrap').style.display = 'none';
+        if (!isLive) paintSeekBar();
         return;
       }
       paintSeekBar();
@@ -4427,6 +4558,12 @@
     rebuffering = false;
     streamRetry = 0;
     seekSettleUntil = 0;
+    if (!fromRebuffer) {
+      adaptiveWarmupUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
+      adaptivePressureSince = 0;
+      adaptivePressureSampleAt = 0;
+      adaptiveEmergencyWaitLogged = false;
+    }
     try {
       var ctx = out.context;
       var now = ctx ? ctx.currentTime : 0;
@@ -4471,6 +4608,7 @@
       start: startAt,
       videoTime: player && player.video ? player.video.currentTime : 0,
       queuedAudio: queuedAudio(),
+      audioQueueTargetSec: AUDIO_QUEUE_SEC,
       audioAhead: audioAheadSec(),
       videoAhead: videoAheadSec(),
       prerollMs: prerollAt ? Date.now() - prerollAt : 0,
@@ -4529,6 +4667,10 @@
     adaptiveRebufferTimes = [];
     adaptiveStableSince = 0;
     adaptiveRestoreAttemptAt = 0;
+    adaptivePressureSince = 0;
+    adaptivePressureSampleAt = 0;
+    adaptiveEmergencyWaitLogged = false;
+    adaptiveWarmupUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
     autoQualityUpSince = 0;
     autoQualityDownSince = 0;
     autoQualityDownStartBuffer = 0;
@@ -4537,22 +4679,21 @@
 
   function markManualPlaybackRestart(resetRate) {
     noteManualPlaybackAction();
-    if (resetRate) adaptiveVideoScale = 1;
+    if (resetRate) {
+      adaptiveVideoScale = 1;
+      adaptiveLastScaleChangeAt = 0;
+    }
     adaptiveIgnoreUntil = 0;
     adaptiveManualRestart = true;
   }
 
   function recordAdaptiveRebuffer() {
-    if (!autoQuality || !autoQualityLoaded) {
-      debugAutoQuality('auto-quality-rebuffer-ignored', {
-        reason: !autoQuality ? 'disabled' : 'preference-not-loaded',
-        quality: quality
-      }, 5000);
-      return false;
-    }
     var now = Date.now();
-    if (adaptiveManualRestart || now < adaptiveIgnoreUntil) {
-      debugPlayback('adaptive-video-rebuffer-ignored', { until: adaptiveIgnoreUntil });
+    if (adaptiveManualRestart || now < adaptiveIgnoreUntil || now < adaptiveWarmupUntil) {
+      debugPlayback('adaptive-bitrate-rebuffer-ignored', {
+        until: Math.max(adaptiveIgnoreUntil, adaptiveWarmupUntil),
+        manualRestart: adaptiveManualRestart
+      });
       return false;
     }
     adaptiveLastRebufferAt = now;
@@ -4561,17 +4702,20 @@
       return now - at <= AUTO_REBUFFER_WINDOW_MS;
     });
     adaptiveRebufferTimes.push(now);
-    debugPlayback('adaptive-video-rebuffer', {
+    debugPlayback('adaptive-bitrate-rebuffer', {
       count: adaptiveRebufferTimes.length,
       windowMs: AUTO_REBUFFER_WINDOW_MS,
       scale: adaptiveVideoScale
     });
     if (adaptiveRebufferTimes.length < AUTO_REBUFFER_TRIGGER_COUNT) return false;
     adaptiveRebufferTimes = [];
-    if (autoQuality && quality === 480) {
+    if (autoQuality && autoQualityLoaded && quality === 480) {
       var resumePosition = currentPos();
       quality = 360;
       adaptiveVideoScale = Math.min(adaptiveVideoScale, AUTO_VIDEO_SCALE_STEPS[1]);
+      adaptiveLastScaleChangeAt = now;
+      adaptivePressureSince = 0;
+      adaptivePressureSampleAt = 0;
       autoQualityLastSwitchAt = now;
       autoQualityDownSince = 0;
       autoQualityDownStartBuffer = 0;
@@ -4592,6 +4736,9 @@
     }
     var previousScale = adaptiveVideoScale;
     adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[scaleIndex + 1];
+    adaptiveLastScaleChangeAt = now;
+    adaptivePressureSince = 0;
+    adaptivePressureSampleAt = 0;
     debugPlayback('adaptive-video-downshift', {
       quality: quality,
       fromScale: previousScale,
@@ -4602,17 +4749,124 @@
     return true;
   }
 
+  function maybeDownshiftAdaptiveVideoScale() {
+    var now = Date.now();
+    if (isLive || !playing || paused || ended || nearEnd() || prerolling || rebuffering || recoveringStream || seamPlayer
+      || now < adaptiveWarmupUntil || now < adaptiveIgnoreUntil || (seekSettleUntil && now < seekSettleUntil)) {
+      adaptivePressureSince = 0;
+      adaptivePressureSampleAt = 0;
+      adaptiveEmergencyWaitLogged = false;
+      return;
+    }
+    var ahead = packedAhead();
+    var audioAhead = audioAheadSec();
+    var critical = ahead <= AUTO_VIDEO_PRESSURE_CRITICAL_SEC;
+    if (!critical && now - adaptiveLastScaleChangeAt < AUTO_VIDEO_DOWNSHIFT_COOLDOWN_MS) return;
+    if (!adaptivePressureSampleAt) {
+      adaptivePressureSampleAt = now;
+      adaptivePressureSampleBuffer = ahead;
+      adaptivePressureSampleAudioBuffer = audioAhead;
+      adaptiveEmergencyWaitLogged = false;
+      return;
+    }
+    var elapsed = now - adaptivePressureSampleAt;
+    if (elapsed < AUTO_VIDEO_PRESSURE_SAMPLE_MS) return;
+    var drainRate = (adaptivePressureSampleBuffer - ahead) * 1000 / elapsed;
+    var audioDrainRate = (adaptivePressureSampleAudioBuffer - audioAhead) * 1000 / elapsed;
+    adaptivePressureSampleAt = now;
+    adaptivePressureSampleBuffer = ahead;
+    adaptivePressureSampleAudioBuffer = audioAhead;
+    var pressure = critical || (ahead <= AUTO_VIDEO_PRESSURE_EARLY_SEC && drainRate >= AUTO_VIDEO_PRESSURE_TREND_SEC_PER_SEC);
+    if (!pressure) {
+      adaptivePressureSince = 0;
+      adaptiveEmergencyWaitLogged = false;
+      return;
+    }
+    if (!adaptivePressureSince) adaptivePressureSince = now;
+    var holdMs = critical ? AUTO_VIDEO_PRESSURE_CRITICAL_HOLD_MS : AUTO_VIDEO_PRESSURE_HOLD_MS;
+    if (now - adaptivePressureSince < holdMs) return;
+    var audioReserve = audioAheadSec();
+    var scaleIndex = AUTO_VIDEO_SCALE_STEPS.indexOf(adaptiveVideoScale);
+    if (scaleIndex < 0) scaleIndex = 0;
+    if (scaleIndex >= AUTO_VIDEO_SCALE_STEPS.length - 1) {
+      adaptivePressureSince = 0;
+      return;
+    }
+    var previousScale = adaptiveVideoScale;
+    if (critical && audioReserve < 3) {
+      var timeToAudioEmpty = audioDrainRate > 0 ? audioReserve / audioDrainRate : Infinity;
+      var audioAtRisk = audioReserve <= AUTO_VIDEO_PRESSURE_EMERGENCY_AUDIO_SEC
+        || timeToAudioEmpty <= AUTO_VIDEO_PRESSURE_EMERGENCY_TIME_TO_EMPTY_SEC;
+      if (!audioAtRisk) {
+        if (!adaptiveEmergencyWaitLogged) {
+          adaptiveEmergencyWaitLogged = true;
+          debugPlayback('adaptive-bitrate-emergency-waiting', {
+            quality: quality,
+            scale: adaptiveVideoScale,
+            packedBufferSec: ahead,
+            audioBufferSec: audioReserve,
+            audioDrainRate: Math.round(audioDrainRate * 10) / 10,
+            estimatedAudioTimeToEmptySec: isFinite(timeToAudioEmpty) ? Math.round(timeToAudioEmpty * 10) / 10 : null,
+            emergencyThresholdSec: AUTO_VIDEO_PRESSURE_EMERGENCY_AUDIO_SEC
+          });
+        }
+        return;
+      }
+      adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[AUTO_VIDEO_SCALE_STEPS.length - 1];
+      adaptiveLastScaleChangeAt = now;
+      adaptivePressureSince = 0;
+      adaptivePressureSampleAt = 0;
+      adaptiveEmergencyWaitLogged = false;
+      adaptiveStableSince = 0;
+      adaptiveRebufferTimes = [];
+      var resumePosition = currentPos();
+      debugPlayback('adaptive-bitrate-emergency-restart', {
+        quality: quality,
+        fromScale: previousScale,
+        toScale: adaptiveVideoScale,
+        packedBufferSec: ahead,
+        audioBufferSec: audioReserve,
+        audioDrainRate: Math.round(audioDrainRate * 10) / 10,
+        estimatedAudioTimeToEmptySec: isFinite(timeToAudioEmpty) ? Math.round(timeToAudioEmpty * 10) / 10 : null,
+        position: resumePosition
+      });
+      playUrl(playing, resumePosition, { skipInfo: true, recovery: true });
+      return;
+    }
+    adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[scaleIndex + 1];
+    if (!beginSeamlessReconnect(false, quality, false, 3, 'adaptive-bitrate-downshift')) {
+      adaptiveVideoScale = previousScale;
+      adaptivePressureSince = 0;
+      return;
+    }
+    adaptiveLastScaleChangeAt = now;
+    adaptivePressureSince = 0;
+    adaptivePressureSampleAt = 0;
+    adaptiveEmergencyWaitLogged = false;
+    adaptiveStableSince = 0;
+    adaptiveRebufferTimes = [];
+    debugPlayback('adaptive-bitrate-downshift-request', {
+      quality: quality,
+      fromScale: previousScale,
+      toScale: adaptiveVideoScale,
+      packedBufferSec: ahead,
+      audioBufferSec: audioAheadSec(),
+      drainRate: Math.round(drainRate * 10) / 10
+    });
+  }
+
   function maybeRestoreAdaptiveVideoScale() {
-    if (!autoQuality || !autoQualityLoaded || adaptiveVideoScale >= 1 || !playing || paused || ended || prerolling || rebuffering || recoveringStream || seamPlayer) {
+    if (adaptiveVideoScale >= 1 || !playing || paused || ended || isLive || prerolling || rebuffering || recoveringStream || seamPlayer) {
       adaptiveStableSince = 0;
       return;
     }
     var now = Date.now();
-    if (now < adaptiveIgnoreUntil || nearEnd()) {
+    if (now < adaptiveIgnoreUntil || now < adaptiveWarmupUntil || nearEnd()) {
       adaptiveStableSince = 0;
       return;
     }
-    if (packedAhead() < AUTO_VIDEO_RESTORE_BUFFER_SEC) {
+    var restoreBufferSec = Math.max(AUTO_VIDEO_RESTORE_BUFFER_SEC, Math.min(15, bufTarget * 0.6));
+    if (packedAhead() < restoreBufferSec) {
       adaptiveStableSince = 0;
       return;
     }
@@ -4625,10 +4879,11 @@
     if (scaleIndex <= 0) return;
     var previousScale = adaptiveVideoScale;
     adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[scaleIndex - 1];
-    if (!beginSeamlessReconnect(false)) {
+    if (!beginSeamlessReconnect(false, null, false, null, 'adaptive-bitrate-restore')) {
       adaptiveVideoScale = previousScale;
       return;
     }
+    adaptiveLastScaleChangeAt = now;
     adaptiveStableSince = 0;
     adaptiveRebufferTimes = [];
     debugPlayback('adaptive-video-upshift', {
@@ -4689,6 +4944,27 @@
     if (quality <= 360) {
       autoQualityDownSince = 0;
       autoQualityDownStartBuffer = 0;
+      if (adaptiveVideoScale < 1) {
+        autoQualityUpSince = 0;
+        debugAutoQuality('auto-quality-upshift-deferred-for-bitrate-recovery', {
+          quality: quality,
+          adaptiveVideoScale: adaptiveVideoScale,
+          bufferSec: Math.round(ahead * 10) / 10
+        }, 5000);
+        return;
+      }
+      var expectedFrameIntervalMs = 1000 / (fps || 24);
+      var frameCadenceStable = lastFrameInterval > 0 && lastFrameInterval <= expectedFrameIntervalMs * 1.5;
+      if (!frameCadenceStable) {
+        autoQualityUpSince = 0;
+        debugAutoQuality('auto-quality-upshift-deferred-frame-instability', {
+          quality: quality,
+          frameIntervalMs: lastFrameInterval,
+          maxFrameIntervalMs: Math.round(expectedFrameIntervalMs * 1.5),
+          bufferSec: Math.round(ahead * 10) / 10
+        }, 5000);
+        return;
+      }
       if (ahead < AUTO_QUALITY_UP_BUFFER_SEC
         || now - adaptiveLastRebufferAt < AUTO_QUALITY_RECOVERY_QUIET_MS
         || now - autoQualityLastSwitchAt < AUTO_QUALITY_RECOVERY_QUIET_MS) {
@@ -4697,7 +4973,7 @@
       }
       if (!autoQualityUpSince) autoQualityUpSince = now;
       if (now - autoQualityUpSince < AUTO_QUALITY_UP_STABLE_MS) return;
-      if (beginSeamlessReconnect(false, 480, true)) {
+      if (beginSeamlessReconnect(false, 480, true, null, 'auto-quality-upshift')) {
         autoQualityUpSince = 0;
         debugPlayback('auto-quality-upshift-request', { from: 360, to: 480, bufferSec: ahead });
       }
@@ -4719,11 +4995,34 @@
     }
     if (now - autoQualityDownSince < AUTO_QUALITY_DOWN_TREND_SEC
       || autoQualityDownStartBuffer - ahead < 1) return;
-    if (beginSeamlessReconnect(false, 360, true)) {
-      autoQualityDownSince = 0;
-      autoQualityDownStartBuffer = 0;
-      debugPlayback('auto-quality-downshift-request', { from: 480, to: 360, bufferSec: ahead });
+    if (adaptiveVideoScale > AUTO_VIDEO_SCALE_STEPS[AUTO_VIDEO_SCALE_STEPS.length - 1]) {
+      debugAutoQuality('auto-quality-downshift-deferred-for-bitrate-recovery', {
+        quality: quality,
+        adaptiveVideoScale: adaptiveVideoScale,
+        bufferSec: Math.round(ahead * 10) / 10
+      }, 5000);
+      return;
     }
+    var resumePosition = currentPos();
+    var candidateAudioAhead = audioAheadSec();
+    quality = 360;
+    paintQualityButtons();
+    autoQualityLastSwitchAt = now;
+    autoQualityDownSince = 0;
+    autoQualityDownStartBuffer = 0;
+    adaptiveLastScaleChangeAt = now;
+    adaptivePressureSince = 0;
+    adaptivePressureSampleAt = 0;
+    adaptiveRebufferTimes = [];
+    debugPlayback('auto-quality-downshift-restart', {
+      from: 480,
+      to: 360,
+      position: resumePosition,
+      packedBufferSec: ahead,
+      audioBufferSec: candidateAudioAhead,
+      adaptiveVideoScale: adaptiveVideoScale
+    });
+    playUrl(playing, resumePosition, { skipInfo: true, recovery: true });
   }
 
   function shouldRebuffer() {
@@ -4833,9 +5132,8 @@
         var readyV = this.video && (rebuffering
           ? rebufferVideoDecodeAt >= prerollAt
           : (stageFrameReady && lastVideoDecodeAt >= prerollAt));
-        var minA = rebuffering ? 0.8 : 0.3;
-        var maxWait = rebuffering ? 20000 : 8000;
-        var ready = (readyA >= need && readyV) || (waited > 4000 && readyV && readyA > 0.2) || (waited > maxWait && readyA > minA && readyV);
+        var fallbackWait = rebuffering ? 8000 : 6000;
+        var ready = (readyA >= need && readyV) || (waited > fallbackWait && readyV && readyA >= 1);
         if (ready && paused) {
           stagePrerollReady = true;
           updateStageLoader('');
@@ -4885,6 +5183,7 @@
       if (!this.video) return;
       skipVideoToSound(this);
       applyStreamHold();
+      if (this === player) maybeDownshiftAdaptiveVideoScale();
       if (this === player) maybeRestoreAdaptiveVideoScale();
       if (this === player) maybeAutoQualitySwitch();
       if (needStreamRestart) restartFromSound();
@@ -4930,6 +5229,8 @@
     prerollAt = Date.now();
     lastStreamErr = '';
     lastDeadVideoRestart = 0;
+    adaptivePressureSince = 0;
+    adaptivePressureSampleAt = 0;
     if (prerollTimer) clearTimeout(prerollTimer);
     var waitMs = 25000;
     if (startAt > 2) waitMs += Math.min(120000, Math.floor(startAt) * 500);
@@ -5041,20 +5342,42 @@
       n++;
     }
     if (!seamHasFrame && pl.video && pl.video.decode && pl.video.decode()) seamHasFrame = true;
-    var ready = !!(seamHasFrame && pending >= 1);
-    if (ready && !seamReady && seamAutoQuality) {
-      debugPlayback('auto-quality-candidate-ready', {
+    var ready = !!(seamHasFrame && pending >= SEAM_JOIN_AUDIO_READY_SEC);
+    if (ready && !seamReady) {
+      debugPlayback('seamless-candidate-ready', {
+        trigger: seamTriggerReason || 'unspecified',
         targetQuality: seamQuality,
         queuedAudioSec: pending,
-        spliceAt: seamSpliceAt
+        spliceAt: seamSpliceAt,
+        waitMs: seamStarted ? Date.now() - seamStarted : 0,
+        currentFrameIntervalMs: lastFrameInterval,
+        currentFrameAgeMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : null
       });
+      if (seamAutoQuality) {
+        debugPlayback('auto-quality-candidate-ready', {
+          targetQuality: seamQuality,
+          queuedAudioSec: pending,
+          spliceAt: seamSpliceAt
+        });
+      }
     }
     seamReady = ready;
   }
 
   function cancelSeam(reason) {
+    var hadCandidate = !!seamPlayer;
     var cancelledAutoQuality = seamAutoQuality;
     var cancelledQuality = seamQuality;
+    if (hadCandidate) {
+      debugPlayback('seamless-candidate-cancelled', {
+        trigger: seamTriggerReason || 'unspecified',
+        targetQuality: cancelledQuality || quality,
+        reason: reason || 'cancelled',
+        waitMs: seamStarted ? Date.now() - seamStarted : 0,
+        ready: seamReady,
+        audioBufferSec: audioAheadSec()
+      });
+    }
     if (cancelledAutoQuality) {
       debugPlayback('auto-quality-candidate-cancelled', {
         targetQuality: cancelledQuality,
@@ -5071,6 +5394,7 @@
     seamAutoQuality = false;
     seamAutoDeadline = 0;
     seamStarted = 0;
+    seamTriggerReason = '';
     seamLegacy = false;
     recoveringStream = false;
     if (extra) {
@@ -5115,6 +5439,37 @@
     var previousQuality = quality;
     var nextQuality = seamQuality || quality;
     var autoQualitySwitch = seamAutoQuality;
+    var triggerReason = seamTriggerReason || 'unspecified';
+    var previousPosition = currentPos();
+    var previousVideoTime = player.video && isFinite(player.video.currentTime) ? player.video.currentTime : -1;
+    var previousAudioTime = playingSoundTime({ fallback: false });
+    var previousAudioBufferSec = audioAheadSec();
+    var previousVideoBufferSec = videoAheadSec();
+    var previousPackedBufferSec = packedAhead();
+    var previousFrameIntervalMs = lastFrameInterval;
+    var previousFrameAgeMs = lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : null;
+    var candidateVideoTime = next.video && isFinite(next.video.currentTime) ? next.video.currentTime : -1;
+    var candidateAudioBufferSec = pendingAudioSec(next.audioOut);
+    var transitionWaitMs = seamStarted ? Date.now() - seamStarted : 0;
+    debugPlayback('seamless-prejoin-state', {
+      trigger: triggerReason,
+      fromQuality: previousQuality,
+      toQuality: nextQuality,
+      spliceAt: at,
+      transitionWaitMs: transitionWaitMs,
+      currentPosition: previousPosition,
+      currentVideoTime: previousVideoTime,
+      currentAudioTime: previousAudioTime,
+      currentDriftSec: previousVideoTime >= 0 && previousAudioTime > 0 ? previousVideoTime - previousAudioTime : null,
+      audioBufferSec: previousAudioBufferSec,
+      videoBufferSec: previousVideoBufferSec,
+      packedBufferSec: previousPackedBufferSec,
+      frameIntervalMs: previousFrameIntervalMs,
+      frameAgeMs: previousFrameAgeMs,
+      candidateVideoTime: candidateVideoTime,
+      candidateAudioBufferSec: candidateAudioBufferSec,
+      candidateReady: seamReady
+    });
     if (seamTimer) { clearInterval(seamTimer); seamTimer = null; }
     seamPlayer = null;
     seamCanvas = null;
@@ -5124,6 +5479,8 @@
     seamQuality = 0;
     seamAutoQuality = false;
     seamAutoDeadline = 0;
+    seamStarted = 0;
+    seamTriggerReason = '';
     seamLegacy = false;
     recoveringStream = false;
     next._seam = false;
@@ -5178,7 +5535,18 @@
     fitStage();
     debugPlayback('seamless-join', {
       at: at,
-      queuedAudio: queuedAudio()
+      trigger: triggerReason,
+      fromQuality: previousQuality,
+      toQuality: nextQuality,
+      fromPosition: previousPosition,
+      fromVideoTime: previousVideoTime,
+      fromAudioTime: previousAudioTime,
+      fromAudioBufferSec: previousAudioBufferSec,
+      candidateVideoTime: candidateVideoTime,
+      candidateAudioBufferSec: candidateAudioBufferSec,
+      transitionWaitMs: transitionWaitMs,
+      queuedAudio: queuedAudio(),
+      audioAheadSec: audioAheadSec()
     });
   }
 
@@ -5198,7 +5566,7 @@
       return;
     }
     var left = audioAheadSec();
-    if (seamReady && left < 0.45) {
+    if (seamReady && left < 0.12) {
       commitSeam();
       return;
     }
@@ -5216,19 +5584,21 @@
     }
   }
 
-  function beginSeamlessReconnect(legacy, targetQuality, autoQualityCandidate) {
+  function beginSeamlessReconnect(legacy, targetQuality, autoQualityCandidate, minimumBufferSec, triggerReason) {
     if (seamPlayer) return true;
     if (!playing || !player || paused || ended || isLive) {
       if (autoQualityCandidate) debugAutoQuality('auto-quality-candidate-waiting', { reason: 'playback-state-changed', targetQuality: targetQuality || quality }, 5000);
       return false;
     }
     var remain = audioAheadSec();
-    if (!(remain >= 4)) {
+    var requiredBufferSec = Number(minimumBufferSec);
+    if (!(requiredBufferSec > 0)) requiredBufferSec = 4;
+    if (!(remain >= requiredBufferSec)) {
       if (autoQualityCandidate) debugAutoQuality('auto-quality-candidate-waiting', {
         reason: 'insufficient-audio-buffer',
         targetQuality: targetQuality || quality,
         bufferSec: remain,
-        requiredBufferSec: 4
+        requiredBufferSec: requiredBufferSec
       }, 5000);
       return false;
     }
@@ -5245,9 +5615,10 @@
     seamQuality = parseInt(targetQuality, 10) || quality;
     seamAutoQuality = !!autoQualityCandidate;
     seamAutoDeadline = seamAutoQuality
-      ? Date.now() + Math.min(AUTO_QUALITY_CANDIDATE_TIMEOUT_MS, Math.max(3000, (remain - 4) * 1000))
+      ? Date.now() + Math.min(AUTO_QUALITY_CANDIDATE_TIMEOUT_MS, Math.max(3000, (remain - 0.1) * 1000))
       : 0;
     seamLegacy = !!legacy;
+    seamTriggerReason = triggerReason || 'unspecified';
     seamReady = false;
     seamHasFrame = false;
     seamStarted = Date.now();
@@ -5307,17 +5678,34 @@
       if (seamPlayer.play) seamPlayer.play();
     } catch (ePlay) {}
     if (seamTimer) clearInterval(seamTimer);
-    seamTimer = setInterval(watchSeam, 200);
+    seamTimer = setInterval(watchSeam, 50);
+    debugPlayback('seamless-candidate-started', {
+      trigger: seamTriggerReason,
+      automaticQuality: seamAutoQuality,
+      fromQuality: quality,
+      toQuality: seamQuality,
+      videoScale: adaptiveVideoScale,
+      spliceAt: at,
+      audioBufferSec: remain,
+      timeoutMs: seamAutoDeadline ? seamAutoDeadline - Date.now() : null
+    });
     if (seamAutoQuality) {
       debugPlayback('auto-quality-candidate-started', {
         from: quality,
         to: seamQuality,
         spliceAt: at,
         bufferSec: remain,
-        timeoutMs: seamAutoDeadline - Date.now()
+        timeoutMs: seamAutoDeadline - Date.now(),
+        trigger: triggerReason || 'unspecified'
       });
     }
-    debugPlayback('seamless-prefetch', { at: at, remain: remain });
+    debugPlayback('seamless-prefetch', {
+      at: at,
+      remain: remain,
+      quality: seamQuality,
+      videoScale: adaptiveVideoScale,
+      trigger: triggerReason || 'unspecified'
+    });
     return true;
   }
 
@@ -5334,7 +5722,7 @@
     var orig = src.onMessage.bind(src);
     src.__hookGen = gen;
     src.__onMsg = function (ev) {
-      if (gen !== streamGen) return;
+      if (gen !== streamGen || !player || player.source !== src) return;
       if (ev && typeof ev.data === 'string') {
         try {
           var msg = JSON.parse(ev.data);
@@ -5413,6 +5801,13 @@
       if (src.__closedOnce) return;
       src.__closedOnce = true;
       if (gen !== streamGen) return;
+      if (!player || player.source !== src) {
+        debugPlayback('stale-stream-close-ignored', {
+          generation: gen,
+          currentGeneration: streamGen
+        });
+        return;
+      }
       disableReconnect();
       if (origClose) {
         try { origClose(); } catch (eC) {}
@@ -5443,7 +5838,7 @@
       if (!ended && playing && !paused && !streamEnded && !nearEnd() && !recoveringStream) {
         if (Date.now() - lastSocketRestart < 12000) return;
         lastSocketRestart = Date.now();
-        if (beginSeamlessReconnect()) return;
+        if (beginSeamlessReconnect(false, null, false, null, 'socket-recovery')) return;
         if (!isLive && duration > 0 && tailCoversTitle()) {
           markStreamEnded();
           return;
@@ -5714,6 +6109,14 @@
 
   function seekTo(sec) {
     if (!playing) return;
+    if (durationSource !== playing || !(duration > 0)) {
+      debugPlayback('seek-ignored-metadata-pending', {
+        playing: playing,
+        durationSource: durationSource,
+        duration: duration
+      });
+      return;
+    }
     if (membersShownId && membersShownId === videoIdFromSrc(playing)) {
       setStatus('회원전용 영상입니다');
       return;
@@ -5739,6 +6142,28 @@
       try { jumped = seekInsideBuffer(t); } catch (eSeek) { jumped = false; }
       if (jumped) {
         adaptiveIgnoreUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
+        var seekSocket = streamSocket();
+        var seekAudioAhead = audioAheadSec();
+        var seekPackedAhead = packedAhead();
+        if (!paused && (!seekSocket || seekSocket.readyState !== 1) && !tailCoversTitle()) {
+          var continuationMinimum = Math.max(0.8, Math.min(3, seekAudioAhead - 0.5));
+          var continuationStarted = beginSeamlessReconnect(
+            false,
+            quality,
+            false,
+            continuationMinimum,
+            'buffer-seek-continuation'
+          );
+          debugPlayback('buffer-seek-continuation-request', {
+            target: t,
+            currentPosition: currentPos(),
+            audioBufferSec: seekAudioAhead,
+            packedBufferSec: seekPackedAhead,
+            socketState: seekSocket ? seekSocket.readyState : 'missing',
+            minimumBufferSec: continuationMinimum,
+            candidateStarted: continuationStarted
+          });
+        }
         return;
       }
       if (!o.keepPaused) pausePos = -1;
@@ -5755,7 +6180,7 @@
 
   function seekPctFromEvent(e) {
     var wrap = $('seekWrap');
-    if (!wrap || !duration) return 0;
+    if (!wrap) return 0;
     var x = e.clientX;
     if (e.changedTouches && e.changedTouches[0]) x = e.changedTouches[0].clientX;
     else if (e.touches && e.touches[0]) x = e.touches[0].clientX;
@@ -5768,12 +6193,36 @@
   }
 
   function previewSeek(pct) {
+    pct = Math.max(0, Math.min(1, pct));
+    if (!(duration > 0)) {
+      pendingSeekRatio = pct;
+      if ($('seekPlay')) $('seekPlay').style.width = (pct * 100) + '%';
+      if ($('seekBuf')) {
+        $('seekBuf').style.left = '0%';
+        $('seekBuf').style.width = '0%';
+      }
+      if ($('seekKnob')) $('seekKnob').style.left = (pct * 100) + '%';
+      if ($('seek')) $('seek').value = String(Math.round(pct * 1000));
+      return;
+    }
     seekPick = pct * duration;
     if ($('seekPlay')) $('seekPlay').style.width = (pct * 100) + '%';
     if ($('seekKnob')) $('seekKnob').style.left = (pct * 100) + '%';
     showSeekBuf(seekPick, 0);
     if ($('seek')) $('seek').value = String(seekPick);
     if ($('npTime')) $('npTime').textContent = fmtPlayClock(seekPick) + ' / ' + fmtPlayClock(duration);
+  }
+
+  function finishSeek() {
+    if (duration > 0) {
+      seekTo(seekPick);
+      return;
+    }
+    seeking = false;
+    seekSent = Date.now();
+    if (pendingSeekRatio != null) {
+      debugPlayback('seek-queued-for-media-info', { ratio: pendingSeekRatio, source: playing });
+    }
   }
 
   function overlayOpen() {
@@ -5991,7 +6440,8 @@
     scheduleResumeSync(0);
   }
 
-  function togglePause() {
+  function togglePause(fromNextLookup) {
+    if (nextVidBusy && !fromNextLookup) nextLookupPauseOverridden = true;
     if (!playing) return;
     if (membersShownId && membersShownId === videoIdFromSrc(playing)) {
       setStatus('회원전용 영상입니다');
@@ -6032,22 +6482,73 @@
       paused = false;
       paintPlayButton();
       applyChrome();
-      // A healthy socket can resume in place. Rebuilding the stream on a
-      // short pause throws away the buffer and lands the clock on a new seek.
-      if (pauseWall && Date.now() - pauseWall > 60000 && playing) {
-        var resumeSec = pausePos >= 0 ? pausePos : currentPos();
-        pauseWall = 0;
-        pausePos = -1;
-        markManualPlaybackRestart(false);
-        playUrl(playing, resumeSec, { skipInfo: true });
-        paintSeekBar();
-        showChromeOverlay();
-        return;
-      }
-      pauseWall = 0;
       var socket = streamSocket();
-      if (!socket || socket.readyState !== 1) {
+      var pauseDurationMs = pauseWall ? Date.now() - pauseWall : 0;
+      var reconnectReason = pauseDurationMs > 60000
+        ? 'long-pause'
+        : (!socket || socket.readyState !== 1 ? 'socket-unavailable' : '');
+      if (reconnectReason) {
         var reconnectSec = pausePos >= 0 ? pausePos : startAt;
+        var bufferedAudioSec = audioAheadSec();
+        var bufferedPackedSec = packedAhead();
+        pauseWall = 0;
+        if (player && bufferedPackedSec >= 1 && bufferedAudioSec >= 1) {
+          debugPlayback('pause-resume-buffer-preserved', {
+            reason: reconnectReason,
+            pauseDurationMs: pauseDurationMs,
+            position: reconnectSec,
+            packedBufferSec: bufferedPackedSec,
+            audioBufferSec: bufferedAudioSec,
+            socketState: socket ? socket.readyState : 'missing'
+          });
+          resumeSilentClock();
+          videoCatching = true;
+          resumePlayback();
+          releaseSilentAudio();
+          var candidateSpliceAt = currentPos() + audioAheadSec();
+          var bufferedTailCoversTitle = !isLive && duration > 0 && candidateSpliceAt > duration - 1.5;
+          var candidateStarted = false;
+          if (!bufferedTailCoversTitle) {
+            var minimumBufferSec = Math.min(3, Math.max(0.8, bufferedAudioSec - 0.5));
+            candidateStarted = beginSeamlessReconnect(false, quality, false, minimumBufferSec, 'pause-buffer-resume:' + reconnectReason);
+          }
+          if (!candidateStarted && !bufferedTailCoversTitle) {
+            var fallbackPosition = Math.max(reconnectSec, currentPos() - 0.3);
+            debugPlayback('pause-resume-buffer-fallback', {
+              reason: 'continuation-candidate-not-started',
+              position: fallbackPosition,
+              packedBufferSec: packedAhead(),
+              audioBufferSec: audioAheadSec()
+            });
+            pausePos = -1;
+            markManualPlaybackRestart(false);
+            playUrl(playing, fallbackPosition, { skipInfo: true });
+            paintSeekBar();
+            showChromeOverlay();
+            return;
+          }
+          if (bufferedTailCoversTitle) {
+            debugPlayback('pause-resume-buffer-tail-sufficient', {
+              position: currentPos(),
+              candidateSpliceAt: candidateSpliceAt,
+              duration: duration,
+              audioBufferSec: audioAheadSec(),
+              packedBufferSec: packedAhead()
+            });
+          }
+          paintSeekBar();
+          setStatus('재생');
+          showChromeOverlay();
+          return;
+        }
+        debugPlayback('pause-resume-buffer-unavailable', {
+          reason: reconnectReason,
+          pauseDurationMs: pauseDurationMs,
+          position: reconnectSec,
+          packedBufferSec: bufferedPackedSec,
+          audioBufferSec: bufferedAudioSec,
+          socketState: socket ? socket.readyState : 'missing'
+        });
         pausePos = -1;
         markManualPlaybackRestart(false);
         playUrl(playing, reconnectSec, { skipInfo: true });
@@ -6055,6 +6556,7 @@
         showChromeOverlay();
         return;
       }
+      pauseWall = 0;
       if (!player) {
         var resumeSec2 = pausePos >= 0 ? pausePos : startAt;
         pausePos = -1;
@@ -6268,25 +6770,40 @@
       setStatus('다음 영상이 없습니다');
       return;
     }
+    var restorePlayback = !paused && !!player;
     nextVidBusy = true;
+    nextLookupRestorePlayback = restorePlayback;
+    nextLookupPauseOverridden = false;
+    if (restorePlayback) togglePause(true);
     setStatus('다음 영상을 불러오는 중...');
-    tv.get('/api/youtube/suggest?id=' + encodeURIComponent(id) + '&pick=next', function (code, data) {
+    fetchNextPlaybackItem(function (item) {
       nextVidBusy = false;
       var nowId = (watchItem && watchItem.id) || qsVal('v') || '';
-      if (nowId && nowId !== id) return;
-      var item = nextPlayableItem((data && data.ok && data.items) || [], id);
+      if (nowId && nowId !== id) {
+        nextLookupRestorePlayback = false;
+        nextLookupPauseOverridden = false;
+        return;
+      }
       if (!item) {
         if ($('btnNextVid')) {
           $('btnNextVid').className = 'ctrl is-off';
           $('btnNextVid').setAttribute('aria-disabled', 'true');
         }
+        var shouldResume = nextLookupRestorePlayback && !nextLookupPauseOverridden;
+        nextLookupRestorePlayback = false;
+        nextLookupPauseOverridden = false;
+        if (shouldResume && paused && player && !ended) togglePause();
         setStatus('다음 영상이 없습니다');
         return;
       }
+      nextLookupRestorePlayback = false;
+      nextLookupPauseOverridden = false;
+      var keepSubscriptionOrigin = nextItemKeepsSubscriptionOrigin(item);
       goWatch(item.id, item.url || ('https://www.youtube.com/watch?v=' + item.id), {
         holdRun: true,
         keepFs: true,
         keepFrom: true,
+        clearOrigin: !keepSubscriptionOrigin,
         members: item.members === true,
         channelId: item.channel_id || '',
         channelName: item.uploader || item.channel || '',
@@ -6313,9 +6830,9 @@
     rememberWatch(id, url);
     var leavingFrom = watchFromFavs() ? 'favs' : '';
     var leavingSub = watchSubChannel();
-    var destFavs = opts.keepFrom ? leavingFrom === 'favs' : currentFeed === 'favs';
+    var destFavs = opts.clearOrigin ? false : (opts.keepFrom ? leavingFrom === 'favs' : currentFeed === 'favs');
     var destSub = '';
-    if (!destFavs) {
+    if (!opts.clearOrigin && !destFavs) {
       if (opts.keepFrom) destSub = leavingSub;
       else if (currentFeed === 'subs' && selectedCh) destSub = selectedCh;
     }
@@ -6382,7 +6899,6 @@
     }
     writeWatchBack(stack);
     var stayFs = !!fsOn;
-    stop(stayFs);
     setAutoRunCount(0);
     hideRepeatAsk();
     try {
@@ -6402,14 +6918,17 @@
     }
     var fromQ = watchOriginQuery(!!(prev && prev.from === 'favs'), (prev && prev.from !== 'favs' && prev.sub) || '');
     var membersQ = (prev && prev.members && prev.id) ? membersLinkQuery(prev.ch || '') : '';
+    var previousUrl = '';
     if (prev && prev.id) {
-      location.replace(tv.url('/watch/?v=' + encodeURIComponent(prev.id) + fromQ + membersQ));
+      previousUrl = tv.url('/watch/?v=' + encodeURIComponent(prev.id) + fromQ + membersQ);
+    } else if (prev && prev.url) {
+      previousUrl = tv.url('/watch/?url=' + encodeURIComponent(prev.url) + fromQ);
+    }
+    if (previousUrl) {
+      location.replace(previousUrl);
       return;
     }
-    if (prev && prev.url) {
-      location.replace(tv.url('/watch/?url=' + encodeURIComponent(prev.url) + fromQ));
-      return;
-    }
+    stop(stayFs);
     location.href = tv.url('/player/');
   }
 
@@ -6728,7 +7247,6 @@
     runFeedChange('open', function () {
       feedLayerMode = 'open';
       feedLayerLayout = true;
-      feedHost.className = 'feed-host feed-host-open';
       feedHost.style.transition = '';
       feedHost.style.transform = '';
       setFeedLayerInset();
@@ -7278,7 +7796,6 @@
   if ($('seekWrap')) {
     var wrap = $('seekWrap');
     wrap.ontouchstart = function (e) {
-      if (!duration) return;
       seekTouch = true;
       seeking = true;
       previewSeek(seekPctFromEvent(e));
@@ -7293,12 +7810,11 @@
     wrap.ontouchend = function (e) {
       if (!seeking) return;
       previewSeek(seekPctFromEvent(e));
-      seekTo(seekPick);
+      finishSeek();
       seekTouch = false;
     };
     wrap.onmousedown = function (e) {
       if (seekTouch) return;
-      if (!duration) return;
       seeking = true;
       previewSeek(seekPctFromEvent(e));
     };
@@ -7311,7 +7827,7 @@
       if (seekTouch) { seekTouch = false; return; }
       if (!seeking) return;
       previewSeek(seekPctFromEvent(e));
-      seekTo(seekPick);
+      finishSeek();
     };
     wrap.onmouseleave = function () {
       if (seekTouch || !seeking) return;
@@ -7320,23 +7836,23 @@
     wrap.onclick = function (e) {
       if (seekTouch) { seekTouch = false; return; }
       if (Date.now() - seekSent < 1200) return;
-      if (!duration) return;
       previewSeek(seekPctFromEvent(e));
-      seekTo(seekPick);
+      finishSeek();
       if (e.stopPropagation) e.stopPropagation();
     };
   }
   if ($('seek')) {
     $('seek').oninput = function () {
-      if (!duration) return;
       bumpChrome();
       seeking = true;
       var v = parseFloat(this.value) || 0;
-      previewSeek(Math.max(0, Math.min(1, v / duration)));
+      var max = parseFloat(this.max) || 1000;
+      previewSeek(Math.max(0, Math.min(1, v / (duration > 0 ? duration : max))));
     };
     $('seek').onchange = function () {
       if (Date.now() - seekSent < 400) return;
-      seekTo(parseFloat(this.value) || 0);
+      if (duration > 0) seekTo(parseFloat(this.value) || 0);
+      else finishSeek();
     };
   }
 
