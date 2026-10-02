@@ -40,15 +40,30 @@
   // Keep enough real audio cushion to absorb transport jitter without letting
   // a long scheduled queue make video recovery visibly late.
   var AUDIO_QUEUE_SEC = 2.5;
+  var AUDIO_CUT_FADE_SEC = 0.008;
   var BUFFER_SEEK_MAX_SEC = 12;
   var BUFFER_SEEK_MARGIN_SEC = 1;
   var SEEK_AUDIO_PREROLL_SEC = 3;
   var PREROLL_SEC = 3;
+  var SUBS_DETAIL_BUFFER_SEC = 5;
+  var SUBS_DETAIL_STABLE_MS = 1000;
+  var SUBS_DETAIL_FALLBACK_MS = 10000;
+  var SUBS_WARM_BUFFER_SEC = 5;
+  var AUTO_REBUFFER_WINDOW_MS = 30000;
+  var AUTO_REBUFFER_TRIGGER_COUNT = 2;
+  var AUTO_VIDEO_SCALE_STEPS = [1, 0.75, 0.6];
+  var AUTO_VIDEO_RESTORE_BUFFER_SEC = 10;
+  var AUTO_VIDEO_RESTORE_STABLE_MS = 15000;
+  var AUTO_VIDEO_RESTORE_QUIET_MS = 60000;
+  var AUTO_VIDEO_USER_IGNORE_MS = 8000;
   var bufTarget = 30;
   var seamPlayer = null;
   var seamCanvas = null;
   var seamTimer = null;
   var seamSpliceAt = 0;
+  var seamQuality = 0;
+  var seamAutoQuality = false;
+  var seamAutoDeadline = 0;
   var seamReady = false;
   var seamHasFrame = false;
   var seamStarted = 0;
@@ -83,6 +98,23 @@
   var repeatHeld = false;
   var autoplayNext = false;
   var autoplayLoaded = false;
+  var autoQuality = true;
+  var autoQualityLoaded = false;
+  var autoQualityTouched = false;
+  var autoQualityUpSince = 0;
+  var autoQualityDownSince = 0;
+  var autoQualityDownStartBuffer = 0;
+  var autoQualityCooldownUntil = 0;
+  var autoQualityLastSwitchAt = 0;
+  var autoQualityDebugAt = {};
+  var AUTO_QUALITY_UP_BUFFER_SEC = 20;
+  var AUTO_QUALITY_UP_STABLE_MS = 5000;
+  var AUTO_QUALITY_DOWN_BUFFER_SEC = 15;
+  var AUTO_QUALITY_DOWN_EMERGENCY_SEC = 10;
+  var AUTO_QUALITY_DOWN_TREND_SEC = 3000;
+  var AUTO_QUALITY_HYSTERESIS_SEC = 5;
+  var AUTO_QUALITY_RECOVERY_QUIET_MS = 5000;
+  var AUTO_QUALITY_CANDIDATE_TIMEOUT_MS = 8000;
   var endMode = '';
   var nextToken = 0;
   var nextItem = null;
@@ -113,18 +145,77 @@
     button.setAttribute('aria-checked', autoplayNext ? 'true' : 'false');
   }
 
+  function paintAutoQualityButton() {
+    var button = $('btnAutoQuality');
+    if (!button) return;
+    button.classList.toggle('on', autoQuality);
+    button.setAttribute('aria-pressed', autoQuality ? 'true' : 'false');
+    button.setAttribute('aria-checked', autoQuality ? 'true' : 'false');
+  }
+
+  function paintQualityButtons() {
+    var buttons = document.querySelectorAll('.qbtn');
+    for (var i = 0; i < buttons.length; i++) {
+      var selected = (parseInt(buttons[i].getAttribute('data-q'), 10) || 360) === quality;
+      buttons[i].classList.toggle('on', selected);
+      buttons[i].setAttribute('aria-pressed', selected ? 'true' : 'false');
+    }
+  }
+
+  function setAutoQualityPreference(enabled, source) {
+    enabled = !!enabled;
+    if (enabled && quality >= 720) {
+      setStatus('자동 화질은 360p와 480p에서 사용할 수 있습니다');
+      return false;
+    }
+    var previous = autoQuality;
+    autoQuality = enabled;
+    autoQualityTouched = true;
+    autoQualityLoaded = true;
+    autoQualityUpSince = 0;
+    autoQualityDownSince = 0;
+    autoQualityDownStartBuffer = 0;
+    paintAutoQualityButton();
+    debugPlayback('auto-quality-preference-changed', { enabled: autoQuality, quality: quality, source: source || 'toggle' });
+    if (!autoQuality && seamPlayer && seamAutoQuality) cancelSeam('preference-disabled');
+    if (!currentPin) return true;
+    tv.post('/api/prefs', { autoQuality: autoQuality }, function (code, data) {
+      if (data && data.ok) {
+        debugPlayback('auto-quality-preference-saved', { enabled: autoQuality });
+        return;
+      }
+      autoQuality = previous;
+      autoQualityLoaded = true;
+      paintAutoQualityButton();
+      debugPlayback('auto-quality-preference-save-failed', { code: code, restored: previous });
+    });
+    return true;
+  }
+
   function loadAutoplayPref() {
     var pin = currentPin;
     if (!pin) {
       autoplayNext = false;
+      autoQuality = true;
+      autoQualityLoaded = true;
       paintAutoplayButton();
+      paintAutoQualityButton();
+      debugPlayback('auto-quality-preference-loaded', { enabled: autoQuality, source: 'default-no-pin' });
       return;
     }
     tv.get('/api/prefs', function (c, d) {
       if (pin !== currentPin || autoplayLoaded) return;
       autoplayLoaded = true;
       autoplayNext = !!(d && d.ok && d.autoplayNext);
+      if (!autoQualityTouched) autoQuality = !(d && d.ok && d.autoQuality === false);
+      autoQualityLoaded = true;
       paintAutoplayButton();
+      paintAutoQualityButton();
+      debugPlayback('auto-quality-preference-loaded', {
+        enabled: autoQuality,
+        source: d && d.ok ? 'server' : 'default',
+        touchedDuringLoad: autoQualityTouched
+      });
       if (!volTouched && d && d.ok && d.volume != null && d.volume !== '') {
         var pct = parseInt(d.volume, 10);
         if (pct === pct) {
@@ -220,6 +311,18 @@
   var subsWarmPaint = null;
   var subsWarmHoldLogged = false;
   var pipePending = false;
+  var pendingWatchSourceOpen = false;
+  var pendingSubStats = null;
+  var subStatsTimer = null;
+  var subStatsStableChannel = '';
+  var subStatsStableSince = 0;
+  var adaptiveVideoScale = 1;
+  var adaptiveRebufferTimes = [];
+  var adaptiveLastRebufferAt = 0;
+  var adaptiveIgnoreUntil = 0;
+  var adaptiveManualRestart = false;
+  var adaptiveStableSince = 0;
+  var adaptiveRestoreAttemptAt = 0;
   var subsOpen = null;
   var subPriority = 0;
   var subsLoggedDone = '';
@@ -532,6 +635,17 @@
     data.label = label;
     data.at = new Date().toISOString();
     try { console.log('[tesla-video playback]', data); } catch (e) {}
+  }
+
+  function debugAutoQuality(label, extra, intervalMs) {
+    if (!playbackDebug) return;
+    var reason = extra && extra.reason ? ':' + extra.reason : '';
+    var key = label + reason;
+    var now = Date.now();
+    var lastAt = autoQualityDebugAt[key] || 0;
+    if (now - lastAt < (intervalMs || 0)) return;
+    autoQualityDebugAt[key] = now;
+    debugPlayback(label, extra);
   }
 
   function qsVal(name) {
@@ -1577,7 +1691,27 @@
     showSubsLoadStatus();
   }
 
-  function refreshSubStats(id, seq) {
+  function subStatsReady(id) {
+    if (!playing || !stage) return true;
+    if (!stagePrerollReady || prerolling || rebuffering || selectedCh !== id) return false;
+    if (paused) return true;
+    if (subStatsStableChannel !== id) {
+      subStatsStableChannel = id;
+      subStatsStableSince = 0;
+    }
+    var now = Date.now();
+    if (packedAhead() >= SUBS_DETAIL_BUFFER_SEC) {
+      if (!subStatsStableSince) subStatsStableSince = now;
+      if (now - subStatsStableSince >= SUBS_DETAIL_STABLE_MS) return true;
+    } else {
+      subStatsStableSince = 0;
+    }
+    return !!(videoStartWall && now - videoStartWall >= SUBS_DETAIL_FALLBACK_MS
+      && audioAheadSec() >= 0.2 && stageFrameReady && lastVideoDecodeAt
+      && now - lastVideoDecodeAt < 1500);
+  }
+
+  function fetchSubStats(id, seq) {
     logSubs('상세 확인 시작 · ' + subChannelName(id) + ' · ' + id);
     subPriority++;
     tv.get('/api/subscriptions/channel?id=' + encodeURIComponent(id) + '&limit=16', function (code, data) {
@@ -1623,6 +1757,39 @@
     });
   }
 
+  function refreshSubStats(id, seq) {
+    if (subStatsReady(id)) {
+      pendingSubStats = null;
+      subStatsStableChannel = '';
+      subStatsStableSince = 0;
+      fetchSubStats(id, seq);
+      return;
+    }
+    pendingSubStats = { id: id, seq: seq };
+    logSubs('상세 확인 대기 · ' + subChannelName(id));
+    if (subStatsTimer) return;
+    function check() {
+      subStatsTimer = null;
+      var request = pendingSubStats;
+      if (!request) return;
+      if (!stillReq(request.seq) || currentFeed !== 'subs' || selectedCh !== request.id) {
+        pendingSubStats = null;
+        subStatsStableChannel = '';
+        subStatsStableSince = 0;
+        return;
+      }
+      if (!subStatsReady(request.id)) {
+        subStatsTimer = setTimeout(check, 500);
+        return;
+      }
+      pendingSubStats = null;
+      subStatsStableChannel = '';
+      subStatsStableSince = 0;
+      fetchSubStats(request.id, request.seq);
+    }
+    subStatsTimer = setTimeout(check, 500);
+  }
+
   function sortSubList(items) {
     return (items || []).slice().sort(function (a, b) {
       var ac = a.watch_count || 0;
@@ -1638,18 +1805,15 @@
     return 2000;
   }
 
-  // Background channel prefetch shares the network with the stream. Hold it
-  // only until a play or a reloaded seek has about 5 seconds buffered.
+  // Hold background channel work through playback startup and preroll.
   function playbackNeedsPipe() {
     if (!playing || ended) return false;
     if (pipePending) return true;
-    if (!player) return false;
-    var audioAhead = audioAheadSec();
+    if (!player || prerolling || !stagePrerollReady) return true;
     var ahead = packedAhead();
     var remain = remainSec();
     if (remain <= 0.5 || ahead >= remain - 0.2) return false;
-    if (audioAhead >= 5 || ahead >= 5) return false;
-    return true;
+    return ahead < SUBS_WARM_BUFFER_SEC;
   }
 
   function warmBusy(cid) {
@@ -1702,7 +1866,7 @@
         subsWarmHoldLogged = false;
         logSubs('미리받기 다시 시작');
       }
-      if (subPriority > 0 || subsWarmId) {
+      if (subPriority > 0 || pendingSubStats || subsWarmId) {
         setTimeout(step, 600);
         return;
       }
@@ -1710,6 +1874,10 @@
       if (!nextId) return;
       setTimeout(function () {
         if (gen !== subsWarmGen) return;
+        if (playbackNeedsPipe() || subPriority > 0 || pendingSubStats) {
+          step();
+          return;
+        }
         if (nextWarmId() !== nextId || subPriority > 0 || subVideoCache[nextId] || subsWarmId || (subsOpen && subsOpen.id === nextId) || (selectedCh && nextId === selectedCh)) {
           step();
           return;
@@ -1766,6 +1934,7 @@
     ch.last_seen = Date.now();
     saveBrowseState();
     renderRail();
+    revealSelectedChannel(0);
     tv.post('/api/subscriptions/seen', { channel_id: id }, function () {});
     resetPager('subchannel', { id: id, name: ch.name || '' });
     var cached = subVideoCache[id];
@@ -3082,6 +3251,10 @@
       if (isLive) sendStreamCtrl(false);
       return;
     }
+    if (seamPlayer) {
+      sendStreamCtrl(true);
+      return;
+    }
     var fill = decoderFill();
     var ahead = packedAhead();
     var q = queuedAudio();
@@ -3780,8 +3953,9 @@
     });
   }
 
-  function wsUrlFor(src, start, refresh, legacy) {
-    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + quality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&format=' + encodeURIComponent(streamFormat) + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : ''));
+  function wsUrlFor(src, start, refresh, legacy, requestedQuality, parallel) {
+    var streamQuality = parseInt(requestedQuality, 10) || quality;
+    return tv.ws('/ws/mpeg1?url=' + encodeURIComponent(src) + '&quality=' + streamQuality + '&fps=' + fps + '&vbr=' + (vbrLow ? 'low' : 'norm') + '&vscale=' + adaptiveVideoScale.toFixed(2) + '&format=' + encodeURIComponent(streamFormat) + '&start=' + encodeURIComponent(String(start || 0)) + (refresh ? '&refresh=1' : '') + (legacy ? '&legacy=1' : '') + (parallel ? '&parallel=1' : ''));
   }
 
   var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
@@ -3889,7 +4063,7 @@
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     var legacy = pipeLegacy;
     pipeLegacy = false;
-    launchPlayer(wsUrlFor(src, startAt, legacy || startAt > 2, legacy));
+    launchPlayer(wsUrlFor(src, startAt, legacy, legacy)); //refresh=1 비활성화
     if (paused) {
       holdPlayback();
       videoStartWall = Date.now();
@@ -3987,22 +4161,49 @@
     setStatus(paused ? '일시정지 · 미리 받는 중' : '불러오는 중');
   }
 
+  function rampAudioOutput(out, now, restore) {
+    if (!out || !out.gain || !out.gain.gain) return now;
+    var param = out.gain.gain;
+    var level = Number(param.value);
+    if (!isFinite(level)) level = 1;
+    var end = now + AUDIO_CUT_FADE_SEC;
+    try {
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(level, now);
+      param.linearRampToValueAtTime(0, end);
+      if (restore) {
+        var target = Number(out.volume);
+        if (!isFinite(target)) target = level;
+        param.setValueAtTime(0, end);
+        param.linearRampToValueAtTime(target, end + AUDIO_CUT_FADE_SEC);
+      }
+    } catch (e) {}
+    return end;
+  }
+
   function patchAudioClicks() {
     var WA = window.JSMpeg && JSMpeg.AudioOutput && JSMpeg.AudioOutput.WebAudio;
     if (!WA || WA.prototype.__noclick) return;
     WA.prototype.__noclick = true;
     WA.prototype.destroy = function () {
-      if (this._srcs) {
-        while (this._srcs.length) {
-          var s = this._srcs.shift();
-          try { if (s.stop) s.stop(); } catch (e0) {}
-          try { s.disconnect(); } catch (e1) {}
-        }
+      var ctx = this.context;
+      var now = ctx ? ctx.currentTime : 0;
+      var stopAt = rampAudioOutput(this, now, false);
+      var sources = (this._srcs || []).slice();
+      this._srcs = [];
+      for (var i = 0; i < sources.length; i++) {
+        try { sources[i].onended = null; } catch (e0) {}
+        try { if (sources[i].stop) sources[i].stop(stopAt); } catch (e1) {}
       }
       this.startTime = 0;
       this.mediaOrigin = null;
-      try { this.gain.disconnect(); } catch (e) {}
-      this.context._connections = Math.max(0, (this.context._connections || 1) - 1);
+      setTimeout(function () {
+        for (var j = 0; j < sources.length; j++) {
+          try { sources[j].disconnect(); } catch (e2) {}
+        }
+        try { if (this.gain) this.gain.disconnect(); } catch (e3) {}
+        if (ctx) ctx._connections = Math.max(0, (ctx._connections || 1) - 1);
+      }.bind(this), AUDIO_CUT_FADE_SEC * 2000);
     };
     WA.prototype.getEnqueuedTime = function () {
       if (!this.context) return 0;
@@ -4248,6 +4449,9 @@
         audioMediaCursor = firstVideoTime;
       }
     }
+    if (!fromRebuffer && startAt > 0 && pend.length) {
+      fadeHead(pend[0].left, pend[0].right);
+    }
     // Leave one paint interval for the decoded first frame before the first
     // WebAudio buffer is scheduled. This makes the canvas visible when sound
     // begins without introducing perceptible A/V offset.
@@ -4273,6 +4477,14 @@
       quality: quality,
       bitrateMode: vbrLow ? 'low' : 'normal'
     });
+    if (adaptiveManualRestart) {
+      adaptiveManualRestart = false;
+      adaptiveIgnoreUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
+    }
+    if (pendingWatchSourceOpen) {
+      pendingWatchSourceOpen = false;
+      setTimeout(openWatchSourceChannel, 0);
+    }
   }
 
   function beginRebuffer() {
@@ -4304,12 +4516,214 @@
       lastVideoDecodeMs: lastVideoDecodeAt ? Date.now() - lastVideoDecodeAt : -1,
       audioState: player.audioOut && player.audioOut.context ? player.audioOut.context.state : 'none'
     });
+    if (recordAdaptiveRebuffer()) return;
     prerolling = true;
     rebuffering = true;
     rebufferVideoDecodeAt = 0;
     prerollAt = Date.now();
     sendStreamCtrl(false);
     setStatus('불러오는 중');
+  }
+
+  function noteManualPlaybackAction() {
+    adaptiveRebufferTimes = [];
+    adaptiveStableSince = 0;
+    adaptiveRestoreAttemptAt = 0;
+    autoQualityUpSince = 0;
+    autoQualityDownSince = 0;
+    autoQualityDownStartBuffer = 0;
+    adaptiveIgnoreUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
+  }
+
+  function markManualPlaybackRestart(resetRate) {
+    noteManualPlaybackAction();
+    if (resetRate) adaptiveVideoScale = 1;
+    adaptiveIgnoreUntil = 0;
+    adaptiveManualRestart = true;
+  }
+
+  function recordAdaptiveRebuffer() {
+    if (!autoQuality || !autoQualityLoaded) {
+      debugAutoQuality('auto-quality-rebuffer-ignored', {
+        reason: !autoQuality ? 'disabled' : 'preference-not-loaded',
+        quality: quality
+      }, 5000);
+      return false;
+    }
+    var now = Date.now();
+    if (adaptiveManualRestart || now < adaptiveIgnoreUntil) {
+      debugPlayback('adaptive-video-rebuffer-ignored', { until: adaptiveIgnoreUntil });
+      return false;
+    }
+    adaptiveLastRebufferAt = now;
+    adaptiveStableSince = 0;
+    adaptiveRebufferTimes = adaptiveRebufferTimes.filter(function (at) {
+      return now - at <= AUTO_REBUFFER_WINDOW_MS;
+    });
+    adaptiveRebufferTimes.push(now);
+    debugPlayback('adaptive-video-rebuffer', {
+      count: adaptiveRebufferTimes.length,
+      windowMs: AUTO_REBUFFER_WINDOW_MS,
+      scale: adaptiveVideoScale
+    });
+    if (adaptiveRebufferTimes.length < AUTO_REBUFFER_TRIGGER_COUNT) return false;
+    adaptiveRebufferTimes = [];
+    if (autoQuality && quality === 480) {
+      var resumePosition = currentPos();
+      quality = 360;
+      adaptiveVideoScale = Math.min(adaptiveVideoScale, AUTO_VIDEO_SCALE_STEPS[1]);
+      autoQualityLastSwitchAt = now;
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      paintQualityButtons();
+      debugPlayback('auto-quality-rebuffer-fallback', {
+        from: 480,
+        to: 360,
+        position: resumePosition
+      });
+      playUrl(playing, resumePosition, { skipInfo: true, recovery: true });
+      return true;
+    }
+    var scaleIndex = AUTO_VIDEO_SCALE_STEPS.indexOf(adaptiveVideoScale);
+    if (scaleIndex < 0) scaleIndex = 0;
+    if (scaleIndex >= AUTO_VIDEO_SCALE_STEPS.length - 1) {
+      debugPlayback('adaptive-video-floor', { scale: adaptiveVideoScale });
+      return false;
+    }
+    var previousScale = adaptiveVideoScale;
+    adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[scaleIndex + 1];
+    debugPlayback('adaptive-video-downshift', {
+      quality: quality,
+      fromScale: previousScale,
+      toScale: adaptiveVideoScale,
+      position: currentPos()
+    });
+    playUrl(playing, currentPos(), { skipInfo: true, recovery: true });
+    return true;
+  }
+
+  function maybeRestoreAdaptiveVideoScale() {
+    if (!autoQuality || !autoQualityLoaded || adaptiveVideoScale >= 1 || !playing || paused || ended || prerolling || rebuffering || recoveringStream || seamPlayer) {
+      adaptiveStableSince = 0;
+      return;
+    }
+    var now = Date.now();
+    if (now < adaptiveIgnoreUntil || nearEnd()) {
+      adaptiveStableSince = 0;
+      return;
+    }
+    if (packedAhead() < AUTO_VIDEO_RESTORE_BUFFER_SEC) {
+      adaptiveStableSince = 0;
+      return;
+    }
+    if (!adaptiveStableSince) adaptiveStableSince = now;
+    if (now - adaptiveLastRebufferAt < AUTO_VIDEO_RESTORE_QUIET_MS
+      || now - adaptiveStableSince < AUTO_VIDEO_RESTORE_STABLE_MS
+      || now - adaptiveRestoreAttemptAt < 5000) return;
+    adaptiveRestoreAttemptAt = now;
+    var scaleIndex = AUTO_VIDEO_SCALE_STEPS.indexOf(adaptiveVideoScale);
+    if (scaleIndex <= 0) return;
+    var previousScale = adaptiveVideoScale;
+    adaptiveVideoScale = AUTO_VIDEO_SCALE_STEPS[scaleIndex - 1];
+    if (!beginSeamlessReconnect(false)) {
+      adaptiveVideoScale = previousScale;
+      return;
+    }
+    adaptiveStableSince = 0;
+    adaptiveRebufferTimes = [];
+    debugPlayback('adaptive-video-upshift', {
+      quality: quality,
+      fromScale: previousScale,
+      toScale: adaptiveVideoScale,
+      bufferSec: packedAhead()
+    });
+  }
+
+  function maybeAutoQualitySwitch() {
+    var now = Date.now();
+    // Do not start a quality transition if its splice would land in the title tail.
+    var candidateStartAt = currentPos() + audioAheadSec();
+    if (nearEnd() || (!isLive && duration > 0 && candidateStartAt > duration - 1.5)) {
+      autoQualityUpSince = 0;
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      return;
+    }
+    var reason = '';
+    if (!autoQuality) reason = 'disabled';
+    else if (!autoQualityLoaded) reason = 'preference-not-loaded';
+    else if (!playing) reason = 'no-video';
+    else if (paused) reason = 'paused';
+    else if (ended) reason = 'ended';
+    else if (isLive) reason = 'live-stream';
+    else if (prerolling) reason = 'initial-buffering';
+    else if (rebuffering) reason = 'rebuffering';
+    else if (recoveringStream) reason = 'stream-recovery';
+    else if (seamPlayer) reason = 'quality-candidate-running';
+    else if (quality >= 720) reason = 'manual-quality-720-or-higher';
+    else if (now < adaptiveIgnoreUntil) reason = 'manual-action-cooldown';
+    else if (now < autoQualityCooldownUntil) reason = 'candidate-failure-cooldown';
+    else if (nearEnd()) reason = 'near-video-end';
+    if (reason) {
+      autoQualityUpSince = 0;
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      debugAutoQuality('auto-quality-idle', { reason: reason, quality: quality }, 5000);
+      return;
+    }
+    var ahead = packedAhead();
+    debugAutoQuality('auto-quality-monitor', {
+      quality: quality,
+      bufferSec: Math.round(ahead * 10) / 10,
+      direction: quality <= 360 ? 'waiting-to-upshift' : 'waiting-to-downshift',
+      adaptiveVideoScale: adaptiveVideoScale,
+      upStableMs: autoQualityUpSince ? now - autoQualityUpSince : 0,
+      downTrendMs: autoQualityDownSince ? now - autoQualityDownSince : 0,
+      downBufferDropSec: autoQualityDownSince ? Math.round((autoQualityDownStartBuffer - ahead) * 10) / 10 : 0,
+      lastRebufferAgoMs: adaptiveLastRebufferAt ? now - adaptiveLastRebufferAt : null,
+      lastSwitchAgoMs: autoQualityLastSwitchAt ? now - autoQualityLastSwitchAt : null,
+      upBufferThresholdSec: AUTO_QUALITY_UP_BUFFER_SEC,
+      downBufferThresholdSec: AUTO_QUALITY_DOWN_BUFFER_SEC,
+      emergencyBufferThresholdSec: AUTO_QUALITY_DOWN_EMERGENCY_SEC
+    }, 5000);
+    if (quality <= 360) {
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      if (ahead < AUTO_QUALITY_UP_BUFFER_SEC
+        || now - adaptiveLastRebufferAt < AUTO_QUALITY_RECOVERY_QUIET_MS
+        || now - autoQualityLastSwitchAt < AUTO_QUALITY_RECOVERY_QUIET_MS) {
+        autoQualityUpSince = 0;
+        return;
+      }
+      if (!autoQualityUpSince) autoQualityUpSince = now;
+      if (now - autoQualityUpSince < AUTO_QUALITY_UP_STABLE_MS) return;
+      if (beginSeamlessReconnect(false, 480, true)) {
+        autoQualityUpSince = 0;
+        debugPlayback('auto-quality-upshift-request', { from: 360, to: 480, bufferSec: ahead });
+      }
+      return;
+    }
+    autoQualityUpSince = 0;
+    if (ahead <= AUTO_QUALITY_DOWN_EMERGENCY_SEC) {
+      autoQualityDownSince = now - AUTO_QUALITY_DOWN_TREND_SEC;
+      autoQualityDownStartBuffer = ahead + AUTO_QUALITY_HYSTERESIS_SEC;
+    } else if (ahead <= AUTO_QUALITY_DOWN_BUFFER_SEC) {
+      if (!autoQualityDownSince) {
+        autoQualityDownSince = now;
+        autoQualityDownStartBuffer = ahead;
+      }
+    } else {
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      return;
+    }
+    if (now - autoQualityDownSince < AUTO_QUALITY_DOWN_TREND_SEC
+      || autoQualityDownStartBuffer - ahead < 1) return;
+    if (beginSeamlessReconnect(false, 360, true)) {
+      autoQualityDownSince = 0;
+      autoQualityDownStartBuffer = 0;
+      debugPlayback('auto-quality-downshift-request', { from: 480, to: 360, bufferSec: ahead });
+    }
   }
 
   function shouldRebuffer() {
@@ -4471,6 +4885,8 @@
       if (!this.video) return;
       skipVideoToSound(this);
       applyStreamHold();
+      if (this === player) maybeRestoreAdaptiveVideoScale();
+      if (this === player) maybeAutoQualitySwitch();
       if (needStreamRestart) restartFromSound();
     };
   }
@@ -4625,16 +5041,35 @@
       n++;
     }
     if (!seamHasFrame && pl.video && pl.video.decode && pl.video.decode()) seamHasFrame = true;
-    seamReady = !!(seamHasFrame && pending >= 1);
+    var ready = !!(seamHasFrame && pending >= 1);
+    if (ready && !seamReady && seamAutoQuality) {
+      debugPlayback('auto-quality-candidate-ready', {
+        targetQuality: seamQuality,
+        queuedAudioSec: pending,
+        spliceAt: seamSpliceAt
+      });
+    }
+    seamReady = ready;
   }
 
-  function cancelSeam() {
+  function cancelSeam(reason) {
+    var cancelledAutoQuality = seamAutoQuality;
+    var cancelledQuality = seamQuality;
+    if (cancelledAutoQuality) {
+      debugPlayback('auto-quality-candidate-cancelled', {
+        targetQuality: cancelledQuality,
+        reason: reason || 'cancelled'
+      });
+    }
     if (seamTimer) { clearInterval(seamTimer); seamTimer = null; }
     var extra = seamPlayer;
     seamPlayer = null;
     seamReady = false;
     seamHasFrame = false;
     seamSpliceAt = 0;
+    seamQuality = 0;
+    seamAutoQuality = false;
+    seamAutoDeadline = 0;
     seamStarted = 0;
     seamLegacy = false;
     recoveringStream = false;
@@ -4647,6 +5082,7 @@
       try { seamCanvas.parentNode.removeChild(seamCanvas); } catch (e3) {}
     }
     seamCanvas = null;
+    if (player && !paused) applyStreamHold();
   }
 
   function showSeamCanvas(canvas) {
@@ -4676,12 +5112,18 @@
     var next = seamPlayer;
     var canvas = seamCanvas;
     var at = seamSpliceAt;
+    var previousQuality = quality;
+    var nextQuality = seamQuality || quality;
+    var autoQualitySwitch = seamAutoQuality;
     if (seamTimer) { clearInterval(seamTimer); seamTimer = null; }
     seamPlayer = null;
     seamCanvas = null;
     seamReady = false;
     seamHasFrame = false;
     seamSpliceAt = 0;
+    seamQuality = 0;
+    seamAutoQuality = false;
+    seamAutoDeadline = 0;
     seamLegacy = false;
     recoveringStream = false;
     next._seam = false;
@@ -4693,6 +5135,17 @@
     stopLiveSources(player.audioOut);
     var old = player;
     player = next;
+    streamHeld = false;
+    quality = nextQuality;
+    if (autoQualitySwitch) autoQualityLastSwitchAt = Date.now();
+    if (autoQualitySwitch) {
+      debugPlayback('auto-quality-switch-applied', {
+        from: previousQuality,
+        to: nextQuality,
+        position: at
+      });
+    }
+    paintQualityButtons();
     startAt = at;
     lastPlaybackPos = at;
     bufEnd = at;
@@ -4731,16 +5184,31 @@
 
   function watchSeam() {
     if (!seamPlayer || !playing || ended) {
-      cancelSeam();
+      cancelSeam('playback-ended');
       return;
     }
     if (paused) return;
+    if (seamAutoQuality && !seamReady && Date.now() > seamAutoDeadline) {
+      autoQualityCooldownUntil = Date.now() + AUTO_QUALITY_RECOVERY_QUIET_MS;
+      debugPlayback('auto-quality-candidate-timeout', {
+        targetQuality: seamQuality,
+        bufferSec: audioAheadSec()
+      });
+      cancelSeam('candidate-timeout');
+      return;
+    }
     var left = audioAheadSec();
     if (seamReady && left < 0.45) {
       commitSeam();
       return;
     }
     if (left < 0.3 && !seamReady) {
+      if (seamAutoQuality) {
+        autoQualityCooldownUntil = Date.now() + AUTO_QUALITY_RECOVERY_QUIET_MS;
+        debugPlayback('auto-quality-candidate-missed-tail', { targetQuality: seamQuality });
+        cancelSeam('candidate-missed-tail');
+        return;
+      }
       var resumeSec = Math.max(0, currentPos() - 0.3);
       var legacy = seamLegacy;
       cancelSeam();
@@ -4748,14 +5216,37 @@
     }
   }
 
-  function beginSeamlessReconnect(legacy) {
+  function beginSeamlessReconnect(legacy, targetQuality, autoQualityCandidate) {
     if (seamPlayer) return true;
-    if (!playing || !player || paused || ended || isLive) return false;
+    if (!playing || !player || paused || ended || isLive) {
+      if (autoQualityCandidate) debugAutoQuality('auto-quality-candidate-waiting', { reason: 'playback-state-changed', targetQuality: targetQuality || quality }, 5000);
+      return false;
+    }
     var remain = audioAheadSec();
-    if (!(remain >= 4)) return false;
+    if (!(remain >= 4)) {
+      if (autoQualityCandidate) debugAutoQuality('auto-quality-candidate-waiting', {
+        reason: 'insufficient-audio-buffer',
+        targetQuality: targetQuality || quality,
+        bufferSec: remain,
+        requiredBufferSec: 4
+      }, 5000);
+      return false;
+    }
     var at = currentPos() + remain;
-    if (duration > 0 && at > duration - 1.5) return false;
+    if (duration > 0 && at > duration - 1.5) {
+      if (autoQualityCandidate) debugAutoQuality('auto-quality-candidate-waiting', {
+        reason: 'near-video-end',
+        targetQuality: targetQuality || quality,
+        spliceAt: at
+      }, 5000);
+      return false;
+    }
     seamSpliceAt = at;
+    seamQuality = parseInt(targetQuality, 10) || quality;
+    seamAutoQuality = !!autoQualityCandidate;
+    seamAutoDeadline = seamAutoQuality
+      ? Date.now() + Math.min(AUTO_QUALITY_CANDIDATE_TIMEOUT_MS, Math.max(3000, (remain - 4) * 1000))
+      : 0;
     seamLegacy = !!legacy;
     seamReady = false;
     seamHasFrame = false;
@@ -4769,7 +5260,7 @@
     armingSeam = true;
     try {
       var prefetch = null;
-      prefetch = new JSMpeg.Player(wsUrlFor(playing, at, true, !!legacy), {
+      prefetch = new JSMpeg.Player(wsUrlFor(playing, at, !autoQualityCandidate, !!legacy, seamQuality, true), {
         canvas: seamCanvas,
         audio: true,
         streaming: true,
@@ -4791,11 +5282,18 @@
       seamPlayer = prefetch;
     } catch (eSeam) {
       armingSeam = false;
-      cancelSeam();
+      if (autoQualityCandidate) {
+        debugPlayback('auto-quality-candidate-start-failed', {
+          targetQuality: seamQuality,
+          error: eSeam && eSeam.message ? eSeam.message : String(eSeam)
+        });
+      }
+      cancelSeam('player-construction-failed');
       return false;
     }
     armingSeam = false;
     seamPlayer._seam = true;
+    sendStreamCtrl(true, true);
     if (seamPlayer.audioOut) {
       seamPlayer.audioOut._seamHold = true;
       seamPlayer.audioOut.volume = 0;
@@ -4810,6 +5308,15 @@
     } catch (ePlay) {}
     if (seamTimer) clearInterval(seamTimer);
     seamTimer = setInterval(watchSeam, 200);
+    if (seamAutoQuality) {
+      debugPlayback('auto-quality-candidate-started', {
+        from: quality,
+        to: seamQuality,
+        spliceAt: at,
+        bufferSec: remain,
+        timeoutMs: seamAutoDeadline - Date.now()
+      });
+    }
     debugPlayback('seamless-prefetch', { at: at, remain: remain });
     return true;
   }
@@ -4994,16 +5501,17 @@
     return true;
   }
 
-  function harvestScheduledAudio(out) {
+  function harvestScheduledAudio(out, fadeTransition) {
     var chunks = [];
     var srcs = (out._srcs || []).slice();
     out._srcs = [];
     var now = 0;
     try { if (out.context) now = out.context.currentTime; } catch (eNow) { now = 0; }
+    var hasTransition = !!(fadeTransition && srcs.length);
+    var stopAt = hasTransition ? rampAudioOutput(out, now, true) : now;
     var i;
     for (i = 0; i < srcs.length; i++) {
       var src = srcs[i];
-      try { src.onended = null; } catch (e0) {}
       try {
         var buf = src.buffer;
         var rate = buf ? buf.sampleRate : 0;
@@ -5019,8 +5527,13 @@
           }
         }
       } catch (eCopy) {}
-      try { src.stop(0); } catch (e1) {}
-      try { src.disconnect(); } catch (e2) {}
+      if (hasTransition) {
+        try { src.stop(stopAt); } catch (eStop) {}
+      } else {
+        try { src.onended = null; } catch (eEnded) {}
+        try { src.stop(0); } catch (eStopNow) {}
+        try { src.disconnect(); } catch (eDisconnect) {}
+      }
     }
     var parked = out._parked || [];
     out._parked = [];
@@ -5051,7 +5564,8 @@
       });
       pendAt += pending[i].left.length / pending[i].rate;
     }
-    out.startTime = now;
+    out._seekStartTime = hasTransition ? stopAt : now;
+    out.startTime = out._seekStartTime;
     return chunks;
   }
 
@@ -5106,7 +5620,8 @@
     audioMediaCursor = targetRel;
     out._schedEndMedia = targetRel;
     out._schedEndCtx = now;
-    out.startTime = now;
+    out.startTime = out._seekStartTime > now ? out._seekStartTime : now;
+    out._seekStartTime = 0;
     out._capture = null;
     lastHeard = targetRel;
     endCoastFrom = 0;
@@ -5132,6 +5647,7 @@
       out.enabled = true;
       paused = false;
       pausePos = -1;
+      if (kept.length) fadeHead(kept[0].left, kept[0].right);
       var i;
       for (i = 0; i < kept.length; i++) out.play(kept[i].rate, kept[i].left, kept[i].right);
       lastPlaybackPos = target;
@@ -5156,7 +5672,7 @@
     var targetRel = target - startAt;
     var decoded = player.audio.currentTime;
     var wasPaused = !!paused;
-    var harvested = harvestScheduledAudio(out);
+    var harvested = harvestScheduledAudio(out, !wasPaused);
     var kept = trimChunks(harvested, targetRel);
     if (targetRel > decoded - 0.02) {
       out._capture = [];
@@ -5203,6 +5719,7 @@
       return;
     }
     if (isLive) return;
+    noteManualPlaybackAction();
     if (sec < 0) sec = 0;
     if (duration && sec > duration - 2) sec = Math.max(0, duration - 2);
     seeking = false;
@@ -5220,9 +5737,13 @@
       if (t == null || !playing) return;
       var jumped = false;
       try { jumped = seekInsideBuffer(t); } catch (eSeek) { jumped = false; }
-      if (jumped) return;
+      if (jumped) {
+        adaptiveIgnoreUntil = Date.now() + AUTO_VIDEO_USER_IGNORE_MS;
+        return;
+      }
       if (!o.keepPaused) pausePos = -1;
       setStatus(t > 1 ? '지정한 위치로 이동 중...' : '불러오는 중');
+      markManualPlaybackRestart(false);
       playUrl(playing, t, o);
     }, 120);
   }
@@ -5309,7 +5830,7 @@
   }
 
   function fadeHead(left, right) {
-    var n = Math.min(64, left.length);
+    var n = Math.min(220, left.length);
     var f;
     for (f = 0; f < n; f++) {
       var g = f / n;
@@ -5407,47 +5928,56 @@
 
   function resumePlayback() {
     if (!player) return;
+    var resumePlayer = player;
     resumeAt = Date.now();
     resumePending = true;
     videoCatching = true;
     sendStreamCtrl(false);
     resumeHeard = pauseHeard > 0 ? pauseHeard : lastHeard;
-    if (player.audioOut) {
-      player.audioOut.enabled = true;
-      player.audioOut.unlocked = true;
-      if (prerolling) flushPrerollAudio(player.audioOut);
-      var ctx = player.audioOut.context;
+    var resumeAudioOut = resumePlayer.audioOut;
+    if (resumeAudioOut) {
+      resumeAudioOut.enabled = true;
+      resumeAudioOut.unlocked = true;
+      if (prerolling) flushPrerollAudio(resumeAudioOut);
+      var ctx = resumeAudioOut.context;
       var live = playingSoundTime({ fallback: false });
       debugPlayback('resume-after-paused-seek', {
         videoTime: player.video && isFinite(player.video.currentTime) ? player.video.currentTime : -1,
         audioCursor: audioMediaCursor,
         decodedTime: player.audio && isFinite(player.audio.decodedTime) ? player.audio.decodedTime : -1,
-        pendingAudioSec: pendingAudioSec(player.audioOut),
-        parkedAudioSec: parkedAudioSec(player.audioOut),
+        pendingAudioSec: pendingAudioSec(resumeAudioOut),
+        parkedAudioSec: parkedAudioSec(resumeAudioOut),
         contextTime: ctx ? ctx.currentTime : -1,
         liveSoundTime: live,
         speakerHeard: speakerHeard()
       });
-      // Replay the tail captured at pause. Scheduling it at the video head
-      // would skip the sound that was already queued, and scheduling it at
-      // the decoder head would repeat it.
-      scheduleHeldAudio(player.audioOut);
       // The last frame is from before the pause. Leaving its timestamp in
       // place makes a pause longer than 4s look like a stalled decoder.
       lastVideoDecodeAt = Date.now();
       seekSettleUntil = 0;
+      var resumeHeldAudio = function () {
+        if (paused || player !== resumePlayer) return;
+        // Restore the queued tail only after the suspended context can schedule it.
+        scheduleHeldAudio(resumeAudioOut);
+        applyPlayerVol();
+        skipVideoToSound(resumePlayer);
+        scheduleResumeSync(0);
+      };
       try {
         if (ctx && ctx.state !== 'running' && ctx.resume) {
           var p = ctx.resume();
           if (p && p.then) {
-            p.then(function () {
-              if (paused || !player) return;
-              skipVideoToSound(player);
+            p.then(resumeHeldAudio, function (error) {
+              debugPlayback('resume-audio-context-failed', {
+                state: ctx.state,
+                error: error && error.message ? error.message : String(error)
+              });
             });
-          }
+          } else resumeHeldAudio();
+        } else {
+          resumeHeldAudio();
         }
       } catch (e) {}
-      applyPlayerVol();
     }
     player.wantsToPlay = true;
     player.paused = false;
@@ -5469,12 +5999,14 @@
       return;
     }
     if (ended) {
+      markManualPlaybackRestart(false);
       ended = false;
       hideRepeatAsk();
       playUrl(playing, 0);
       showChromeOverlay();
       return;
     }
+    noteManualPlaybackAction();
     if (!paused) {
       if (!player) return;
       pausePos = currentPos();
@@ -5506,6 +6038,7 @@
         var resumeSec = pausePos >= 0 ? pausePos : currentPos();
         pauseWall = 0;
         pausePos = -1;
+        markManualPlaybackRestart(false);
         playUrl(playing, resumeSec, { skipInfo: true });
         paintSeekBar();
         showChromeOverlay();
@@ -5516,6 +6049,7 @@
       if (!socket || socket.readyState !== 1) {
         var reconnectSec = pausePos >= 0 ? pausePos : startAt;
         pausePos = -1;
+        markManualPlaybackRestart(false);
         playUrl(playing, reconnectSec, { skipInfo: true });
         paintSeekBar();
         showChromeOverlay();
@@ -5524,6 +6058,7 @@
       if (!player) {
         var resumeSec2 = pausePos >= 0 ? pausePos : startAt;
         pausePos = -1;
+        markManualPlaybackRestart(false);
         playUrl(playing, resumeSec2);
       } else {
         resumeSilentClock();
@@ -6071,10 +6606,15 @@
       setStatus('종료');
     }
   };
+  if ($('btnAutoQuality')) $('btnAutoQuality').onclick = function () {
+    setAutoQualityPreference(!autoQuality);
+  };
   updateRepeatButton();
   paintAutoplayButton();
+  paintAutoQualityButton();
   if ($('btnFromStart')) $('btnFromStart').onclick = function () {
     if (!playing) return;
+    markManualPlaybackRestart(false);
     playUrl(playing, 0, { skipInfo: true });
   };
   if ($('playerBox')) $('playerBox').onclick = function (e) {
@@ -6807,12 +7347,16 @@
         apply(this);
         for (var j = 0; j < btns.length; j++) btns[j].className = 'ctrl ' + cls;
         this.className = 'ctrl ' + cls + ' on';
-        if (restart !== false && playing) playUrl(playing, currentPos());
+        if (restart !== false && playing) {
+          markManualPlaybackRestart(true);
+          playUrl(playing, currentPos());
+        }
       };
     }
   }
   bindToggleBtns('.qbtn', 'qbtn', function (el) {
     quality = parseInt(el.getAttribute('data-q'), 10) || 360;
+    if (autoQuality) setAutoQualityPreference(false, 'manual-quality');
   });
   bindToggleBtns('.fbtn', 'fbtn', function (el) {
     fps = parseInt(el.getAttribute('data-fps'), 10) === 30 ? 30 : 24;
@@ -7054,7 +7598,7 @@
     search(lastQuery, 'search');
   }
 
-  function revealSelectedChannel() {
+  function revealSelectedChannel(attempt) {
     var rail = $('subsRail');
     if (!rail || !rail.getBoundingClientRect) return;
     var on = rail.querySelector('.sub-ch.on');
@@ -7065,10 +7609,19 @@
     else if (onRect.bottom > railRect.bottom) rail.scrollTop += onRect.bottom - railRect.bottom;
     if (onRect.left < railRect.left) rail.scrollLeft -= railRect.left - onRect.left;
     else if (onRect.right > railRect.right) rail.scrollLeft += onRect.right - railRect.right;
+    attempt = Number(attempt) || 0;
+    if (attempt < 3) {
+      setTimeout(function () { revealSelectedChannel(attempt + 1); }, attempt === 0 ? 80 : 160);
+    }
   }
 
   function openWatchSourceChannel() {
     if (!stage) return;
+    if (playing && (!stagePrerollReady || prerolling)) {
+      pendingWatchSourceOpen = true;
+      return;
+    }
+    pendingWatchSourceOpen = false;
     var id = watchSubChannel();
     if (!id) return;
     if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs' || currentFeed === 'subs') return;
@@ -7079,7 +7632,6 @@
       return;
     }
     openChannel(id, { keepSeq: true });
-    revealSelectedChannel();
   }
 
   function openWatchSuggestTab() {
