@@ -29,7 +29,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=168">
+<link rel="stylesheet" href="../css/app.css?v=179">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -131,27 +131,6 @@
     </div>
   </div>
   <audio id="na" autoplay playsinline></audio>
-
-  <div class="yt-top">
-    <div class="yt-top-right">
-      <button class="back" id="btnWatchReload" type="button">새로고침</button>
-      <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
-      <button class="star-btn watch-star" id="btnFavWatch" type="button" aria-label="즐겨찾기" data-star="">
-        <svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg>
-      </button>
-    </div>
-    <div class="yt-top-left">
-      <button class="brand yt-home" id="btnYtHome" type="button">
-        <span class="yt-logo" aria-hidden="true"><svg viewBox="0 0 28 20"><rect width="28" height="20" rx="6" fill="#FF0000"/><polygon points="11,5 20,10 11,15" fill="#fff"/></svg></span>
-        <span class="yt-word">YouTube</span>
-      </button>
-    </div>
-    <div class="yt-top-search watch-search">
-      <input class="inp" id="qWatch" placeholder="검색" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
-      <button class="btn" id="btnWatchSearch" type="button">검색</button>
-    </div>
-  </div>
-
   <div class="stat" id="st">영상을 불러오는 중...</div>
   <h1 class="watch-title" id="watchH">재생</h1>
   <p class="watch-meta" id="watchMeta"></p>
@@ -184,8 +163,34 @@
     </div>
   </section>
 
+  <div class="yt-top">
+    <div class="yt-top-right">
+      <button class="back" id="btnWatchReload" type="button">새로고침</button>
+      <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
+      <button class="star-btn watch-star" id="btnFavWatch" type="button" aria-label="즐겨찾기" data-star="">
+        <svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 19.2 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg>
+      </button>
+    </div>
+    <div class="yt-top-left">
+      <button class="brand yt-home" id="btnYtHome" type="button">
+        <span class="yt-logo" aria-hidden="true"><svg viewBox="0 0 28 20"><rect width="28" height="20" rx="6" fill="#FF0000"/><polygon points="11,5 20,10 11,15" fill="#fff"/></svg></span>
+        <span class="yt-word">YouTube</span>
+      </button>
+    </div>
+    <div class="yt-top-search watch-search">
+      <input class="inp" id="qWatch" placeholder="검색" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+      <button class="btn" id="btnWatchSearch" type="button">검색</button>
+    </div>
+  </div>
+
   <button class="btn btn-red bot-help-btn" id="btnBotHelp" type="button" style="display:none">조치 방법 보기</button>
   <div class="chips" id="chips">
+    <button class="lib-filter-btn" id="btnLibFilter" type="button" aria-expanded="false" aria-controls="libSorts" aria-label="필터">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 5h18l-7 8.1V19l-4 2v-7.9L3 5z"/></svg>
+    </button>
+    <button class="lib-filter-btn" id="btnListRefresh" type="button" aria-label="목록 새로고침" title="목록 새로고침">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.17 4.88A8.8 8.8 0 1 1 8.14 4.09L7.33 2.88L14.26 2.5L9.69 7.73L9.24 6.34A6.3 6.3 0 1 0 15.7 6.9Z"/></svg>
+    </button>
     <button class="chip on" data-feed="suggest" type="button">추천 영상</button>
     <button class="chip" data-feed="related" type="button">채널 영상</button>
     <button class="chip" data-feed="search" type="button">검색</button>
@@ -197,8 +202,6 @@
   </div>
   <h2 class="rel-h" id="relH" style="display:none">관련 동영상</h2>
   <div id="libTools" class="lib-tools" style="display:none">
-    <input class="inp" id="libFilter" placeholder="채널명으로 검색">
-    <input class="inp" id="libVidFilter" placeholder="제목으로 필터" style="display:none">
     <div class="lib-sorts" id="libSorts">
       <button class="chip" data-sort="rec" type="button" style="display:none">추천순</button>
       <button class="chip on" data-sort="new" type="button">최신순</button>
@@ -259,8 +262,8 @@
 })();
 </script>
 <script src="../config.js?v=133"></script>
-<script src="../js/common.js?v=136"></script>
+<script src="../js/common.js?v=137"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=310"></script>
+  <script src="../js/player.js?v=329"></script>
 </body>
 </html>

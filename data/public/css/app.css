@@ -265,7 +265,7 @@ h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
 .yt-logo-cell { width: 1%; }
 .yt-q-cell { width: 99%; white-space: normal; }
 .yt-q-cell .inp { width: 100%; display: block; min-width: 160px; }
-.yt-top { overflow: hidden; margin: 0 -8px 12px; padding: 4px 8px 8px; }
+.yt-top { overflow: hidden; margin: 12px -8px 12px; padding: 4px 8px 8px; }
 .yt-top-right { float: right; position: relative; z-index: 6; padding-top: 4px; }
 .yt-top-right .back,
 .yt-top-right .btn {
