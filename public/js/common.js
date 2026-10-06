@@ -83,10 +83,11 @@
     x.onerror = function () { cb(0, { error: 'network' }); };
     x.ontimeout = function () { cb(0, { error: 'timeout' }); };
     x.send(body ? JSON.stringify(body) : null);
+    return x;
   }
 
-  function get(path, cb) { xhr('GET', path, null, cb); }
-  function post(path, body, cb) { xhr('POST', path, body, cb); }
+  function get(path, cb) { return xhr('GET', path, null, cb); }
+  function post(path, body, cb) { return xhr('POST', path, body, cb); }
 
   function pad2(n) {
     n = String(n);
