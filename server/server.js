@@ -76,6 +76,44 @@ function sessionToken(req) {
   return cookies.tv_session || cookies.tv_token || queryToken(req) || req.headers['x-tv-token'] || '';
 }
 
+function tokenCandidates(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const list = [];
+  function add(value) {
+    const token = String(value || '');
+    if (token && list.indexOf(token) < 0) list.push(token);
+  }
+  add(cookies.tv_session);
+  add(cookies.tv_token);
+  add(queryToken(req));
+  add(req.headers['x-tv-token']);
+  return list;
+}
+
+function acceptedToken(req) {
+  const list = tokenCandidates(req);
+  for (var i = 0; i < list.length; i++) {
+    if (touchSession(list[i])) return list[i];
+  }
+  return '';
+}
+
+function sessionCookieHeaders(token, maxAge) {
+  const base = 'Path=/; Max-Age=' + maxAge + '; HttpOnly; SameSite=Lax';
+  return [
+    'tv_session=' + token + '; ' + base,
+    'tv_token=' + token + '; ' + base
+  ];
+}
+
+function clearSessionCookieHeaders() {
+  const base = 'Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+  return [
+    'tv_session=; ' + base,
+    'tv_token=; ' + base
+  ];
+}
+
 let sessionSaveTimer = null;
 function scheduleSaveSessions() {
   if (sessionSaveTimer) return;
@@ -119,14 +157,14 @@ function touchSession(token) {
 }
 
 function sessionOf(req) {
-  const token = sessionToken(req);
-  if (!token || !touchSession(token)) return null;
+  const token = acceptedToken(req);
+  if (!token) return null;
   const rec = sessions.get(token);
   return typeof rec === 'number' ? { pin: '', ts: rec } : rec;
 }
 
 function keepSessionAlive(req, ws) {
-  const token = sessionToken(req);
+  const token = acceptedToken(req);
   if (!token) return;
   const timer = setInterval(function () {
     if (!ws || ws.readyState !== 1) return;
@@ -192,6 +230,13 @@ app.use(function (req, res, next) {
 });
 
 app.use(function (req, res, next) {
+  if (req.path.indexOf('/api/') !== 0) return next();
+  const token = acceptedToken(req);
+  if (token) res.setHeader('Set-Cookie', sessionCookieHeaders(token, SESSION_COOKIE_AGE));
+  next();
+});
+
+app.use(function (req, res, next) {
   if (req.path.indexOf('/api/') !== 0 || isPublicApi(req.path)) return next();
   return requireAuth(req, res, next);
 });
@@ -251,7 +296,7 @@ app.get('/api/health', async function (req, res) {
 
 app.get('/api/auth/status', function (req, res) {
   const rec = sessionOf(req);
-  res.json({ ok: true, required: true, authed: !!rec, pin: rec && rec.pin ? rec.pin : '' });
+  res.json({ ok: true, required: true, authed: !!rec });
 });
 
 app.post('/api/auth/login', function (req, res) {
@@ -266,21 +311,15 @@ app.post('/api/auth/login', function (req, res) {
   const token = crypto.randomBytes(18).toString('hex');
   sessions.set(token, { pin: pin, ts: Date.now() });
   saveSessions();
-  res.setHeader('Set-Cookie', [
-    'tv_session=' + token + '; Path=/; Max-Age=' + SESSION_COOKIE_AGE + '; SameSite=Lax',
-    'tv_token=' + token + '; Path=/; Max-Age=' + SESSION_COOKIE_AGE + '; SameSite=Lax'
-  ]);
-  res.json({ ok: true, token: token, pin: pin });
+  res.setHeader('Set-Cookie', sessionCookieHeaders(token, SESSION_COOKIE_AGE));
+  res.json({ ok: true });
 });
 
 app.post('/api/auth/logout', function (req, res) {
-  const token = parseCookies(req.headers.cookie).tv_session || queryToken(req) || req.headers['x-tv-token'];
+  const token = acceptedToken(req);
   if (token) sessions.delete(token);
   saveSessions();
-  res.setHeader('Set-Cookie', [
-    'tv_session=; Path=/; Max-Age=0; SameSite=Lax',
-    'tv_token=; Path=/; Max-Age=0; SameSite=Lax'
-  ]);
+  res.setHeader('Set-Cookie', clearSessionCookieHeaders());
   res.json({ ok: true });
 });
 
@@ -352,7 +391,7 @@ app.get('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
   const saved = prefs.read(pin);
-  res.json({ ok: true, pin: pin, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
+  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
 });
 
 app.post('/api/prefs', function (req, res) {
@@ -381,7 +420,7 @@ app.get('/api/favorites', async function (req, res) {
     items[j].saved = saved;
     items[j].ts = saved;
   }
-  res.json({ ok: true, pin: pin, items: items });
+  res.json({ ok: true, items: items });
 });
 
 app.post('/api/favorites/toggle', function (req, res) {
@@ -409,7 +448,7 @@ app.post('/api/history/watch', function (req, res) {
 app.get('/api/subscriptions', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  res.json({ ok: true, pin: pin, items: subscriptions.readDecorated(pin) });
+  res.json({ ok: true, items: subscriptions.readDecorated(pin) });
 });
 
 app.post('/api/subscriptions/toggle', async function (req, res) {
@@ -697,7 +736,7 @@ app.post('/api/youtube/cookies', function (req, res) {
   const dest = path.join(config.DATA_DIR, 'youtube-cookies.txt');
   fs.mkdirSync(config.DATA_DIR, { recursive: true });
   fs.writeFileSync(dest, raw.charAt(raw.length - 1) === '\n' ? raw : raw + '\n');
-  res.json({ ok: true, file: dest });
+  res.json({ ok: true });
 });
 
 app.get('/api/youtube/subscriptions', async function (req, res) {

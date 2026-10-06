@@ -20,12 +20,12 @@ function clampVolume(v) {
 }
 
 function read(pin) {
-  var prefs = { autoplayNext: false, autoQuality: true, volume: 100 };
+  var prefs = { autoplayNext: false, autoQuality: false, volume: 100 };
   if (!favorites.validPin(pin)) return prefs;
   try {
     var raw = JSON.parse(fs.readFileSync(fileFor(pin), 'utf8'));
     if (raw && raw.autoplayNext) prefs.autoplayNext = true;
-    if (raw && raw.autoQuality === false) prefs.autoQuality = false;
+    if (raw && raw.autoQuality === true) prefs.autoQuality = true;
     var volume = raw && clampVolume(raw.volume);
     if (volume != null) prefs.volume = volume;
   } catch (e) {}
