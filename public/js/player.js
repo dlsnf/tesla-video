@@ -194,7 +194,7 @@
     paintAutoQualityButton();
     debugPlayback('auto-quality-preference-changed', { enabled: autoQuality, quality: quality, source: source || 'toggle' });
     if (!autoQuality && seamPlayer && seamAutoQuality) cancelSeam('preference-disabled');
-    if (!currentPin) return true;
+    if (!signedIn) return true;
     tv.post('/api/prefs', { autoQuality: autoQuality }, function (code, data) {
       if (data && data.ok) {
         debugPlayback('auto-quality-preference-saved', { enabled: autoQuality });
@@ -209,8 +209,7 @@
   }
 
   function loadAutoplayPref() {
-    var pin = currentPin;
-    if (!pin) {
+    if (!signedIn) {
       autoplayNext = false;
       autoQuality = false;
       autoQualityLoaded = true;
@@ -219,8 +218,9 @@
       debugPlayback('auto-quality-preference-loaded', { enabled: autoQuality, source: 'default-no-pin' });
       return;
     }
+    var gen = prefGen;
     tv.get('/api/prefs', function (c, d) {
-      if (pin !== currentPin || autoplayLoaded) return;
+      if (gen !== prefGen || autoplayLoaded) return;
       autoplayLoaded = true;
       autoplayNext = !!(d && d.ok && d.autoplayNext);
       if (!autoQualityTouched) autoQuality = !!(d && d.ok && d.autoQuality === true);
@@ -319,7 +319,8 @@
   var nextVidBusy = false;
   var libEmpty = '결과 없음';
   var suggestCacheItem = null;
-  var currentPin = '';
+  var signedIn = false;
+  var prefGen = 0;
   var playbackDebug = !!(window.tv && window.tv.getDebug ? window.tv.getDebug() : /(?:^|[?&])debug=1(?:&|$)/.test(String(window.location.search || '')));
   var lastDebugStatus = '';
   var subList = [];
@@ -1656,12 +1657,17 @@
           if (pos === 'sticky') railH = rail.getBoundingClientRect().height || 0;
         }
         var top = feedScroll.getBoundingClientRect().top + railH;
-        feedScroll.scrollTop += el.getBoundingClientRect().top - top;
+        var delta = el.getBoundingClientRect().top - top;
+        if (delta < -2) feedScroll.scrollTop += delta;
         if (feedScroll.scrollTop < 0) feedScroll.scrollTop = 0;
         return;
       }
-      var y = (window.pageYOffset || (document.documentElement && document.documentElement.scrollTop) || 0) + el.getBoundingClientRect().top - 8;
-      try { window.scrollTo(0, Math.max(0, y)); } catch (e) {}
+      var current = window.pageYOffset || (document.documentElement && document.documentElement.scrollTop) || 0;
+      var target = current + el.getBoundingClientRect().top - 8;
+      if (target < 0) target = 0;
+      if (current > target + 2) {
+        try { window.scrollTo(0, target); } catch (e) {}
+      }
     }
     go();
     setTimeout(go, 0);
@@ -2397,7 +2403,7 @@
       libRaw = data.items || [];
       favIds = {};
       for (var i = 0; i < libRaw.length; i++) favIds[libRaw[i].id] = libRaw[i];
-      setStatus('즐겨찾기 ' + libRaw.length + '개' + (currentPin ? ' · PIN ' + currentPin : ''));
+      setStatus('즐겨찾기 ' + libRaw.length + '개');
       applyLibView('즐겨찾기가 없습니다.');
     });
   }
@@ -2681,12 +2687,12 @@
       subIds = {};
       for (var i = 0; i < subList.length; i++) subIds[subList[i].channel_id] = subList[i];
       if (!subList.length) {
-        setStatus('구독한 채널 없음' + (currentPin ? ' · PIN ' + currentPin : ''));
+        setStatus('구독한 채널 없음');
         renderRail();
         if (list) list.innerHTML = '<div class="notice">아직 구독한 채널이 없습니다. 영상을 연 다음 채널명 옆의 빨간 <b>구독</b> 버튼을 누르세요. PIN마다 따로 저장됩니다.</div>';
         return;
       }
-      setStatus('구독 ' + subList.length + '개 채널' + (currentPin ? ' · PIN ' + currentPin : ''));
+      setStatus('구독 ' + subList.length + '개 채널');
       renderRail();
       var pick = want;
       if (pick) {
@@ -3973,8 +3979,33 @@
     frame.className = 'stage-frame on';
   }
 
-  function revealPlayback() {
-    if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg';
+  function blankStage() {
+    preservedStageFrame = '';
+    var frame = $('stageFrame');
+    if (frame) {
+      frame.className = 'stage-frame';
+      try { frame.removeAttribute('src'); } catch (e) {}
+    }
+    if (!stage) return;
+    var w = stage.width || 640;
+    var h = stage.height || 360;
+    if (w < 2) w = 640;
+    if (h < 2) h = 360;
+    try {
+      stage.width = w + 1;
+      stage.width = w;
+      stage.height = h;
+      var ctx = stage.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, stage.width, stage.height);
+      }
+    } catch (e2) {}
+  }
+
+  function revealMembersStage() {
+    blankStage();
+    if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg on';
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     document.body.classList.remove('watch-loading');
   }
@@ -4055,7 +4086,7 @@
     opts = opts || {};
     var id = hint.id || videoIdFromSrc(src) || '';
     if (membersShownId && membersShownId === id && watchItem && watchItem.id === id) {
-      revealPlayback();
+      revealMembersStage();
       setStatus('회원전용 영상입니다');
       paintPlayButton();
       return;
@@ -4076,10 +4107,6 @@
     videoStartWall = 0;
     videoAr = 16 / 9;
     startAt = 0;
-    if (stage) {
-      stage.width = 640;
-      stage.height = 360;
-    }
     var bootFs = false;
     if (keepFsOnBoot) {
       keepFsOnBoot = false;
@@ -4087,7 +4114,7 @@
       bootFs = true;
     }
     applyChrome();
-    revealPlayback();
+    revealMembersStage();
     if (bootFs) {
       setTimeout(fitStage, 0);
       setTimeout(fitStage, 80);
@@ -8317,7 +8344,7 @@
   var volTouched = false;
   var volSaveTimer = 0;
   function saveVolumePref(pct) {
-    if (!currentPin) return;
+    if (!signedIn) return;
     if (volSaveTimer) clearTimeout(volSaveTimer);
     volSaveTimer = setTimeout(function () {
       volSaveTimer = 0;
@@ -8558,11 +8585,12 @@
   };
   function paintLogoutLabel() {
     var els = document.querySelectorAll('.js-logout');
-    var label = currentPin ? ('로그아웃 ' + currentPin) : '로그아웃';
-    for (var i = 0; i < els.length; i++) els[i].textContent = label;
+    for (var i = 0; i < els.length; i++) els[i].textContent = '로그아웃';
   }
 
   function doLogout() {
+    signedIn = false;
+    prefGen++;
     try { if (fsOn) setFs(false); } catch (e) {}
     try { stop(false); } catch (e) {}
     try { localStorage.removeItem('tv_browse'); } catch (e) {}
@@ -8579,7 +8607,7 @@
       libRaw = [];
       lastItems = [];
       selectedCh = '';
-      currentPin = '';
+      signedIn = false;
       autoplayNext = false;
       autoplayLoaded = false;
       paintAutoplayButton();
@@ -8587,8 +8615,9 @@
       loadFavMap();
       loadSubMap();
       tv.get('/api/auth/status', function (c, d) {
-        currentPin = (d && d.pin) || '';
+        signedIn = !!(d && d.authed);
         paintLogoutLabel();
+        if (signedIn) loadAutoplayPref();
       });
       if (stage) {
         var vid = qsVal('v');
@@ -8841,9 +8870,9 @@
   if (stage) showChromeOverlay();
   tv.ensurePin(function () {
     tv.get('/api/auth/status', function (c, d) {
-      currentPin = (d && d.pin) || '';
+      signedIn = !!(d && d.authed);
       paintLogoutLabel();
-      if (currentPin) loadAutoplayPref();
+      if (signedIn) loadAutoplayPref();
     });
     loadServerHistory();
     loadFavMap();

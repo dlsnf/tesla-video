@@ -5,31 +5,27 @@
     try { t = localStorage.getItem('tv_token') || ''; } catch (e) {}
     if (t) return t;
     try {
-      var m = String(document.cookie || '').match(/(?:^|; )tv_token=([^;]*)/);
-      if (m) t = decodeURIComponent(m[1] || '');
-    } catch (e2) {}
-    if (t) return t;
-    try {
       var q = /(?:^|[?&])token=([^&]*)/.exec(String(w.location.search || ''));
       if (q) t = decodeURIComponent(q[1] || '');
     } catch (e3) {}
     return t || '';
   }
-  function setToken(t) {
-    t = String(t || '');
-    if (!t) return;
-    try { localStorage.setItem('tv_token', t); } catch (e) {}
+  function setToken() {}
+  function forgetPinLabel() {
+    try { sessionStorage.removeItem('tv_pin_label'); } catch (e) {}
+  }
+  function stripTokenFromAddress() {
     try {
-      var p = base() || '/';
-      document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=' + p + '; max-age=86400; samesite=lax';
-      if (p !== '/') document.cookie = 'tv_token=' + encodeURIComponent(t) + '; path=/; max-age=86400; samesite=lax';
-    } catch (e2) {}
-    try {
-      if (w.history && w.history.replaceState && String(w.location.search || '').indexOf('token=') < 0) {
-        var href = String(w.location.href || '');
-        w.history.replaceState(null, '', href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(t));
-      }
-    } catch (e3) {}
+      if (!w.history || !w.history.replaceState) return;
+      var u = new w.URL(w.location.href);
+      if (!u.searchParams.has('token')) return;
+      u.searchParams.delete('token');
+      w.history.replaceState(null, '', u.pathname + u.search + u.hash);
+    } catch (e) {}
+  }
+  function clearLegacyToken() {
+    try { localStorage.removeItem('tv_token'); } catch (e) {}
+    stripTokenFromAddress();
   }
   function getDebug() {
     var q = /(?:^|[?&])debug=([^&]*)/.exec(String(w.location.search || ''));
@@ -54,16 +50,10 @@
     if (!getDebug()) return u;
     return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
   }
-  function withToken(u) {
-    var token = getToken();
-    if (!token) return withDebug(u);
-    u = u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
-    return withDebug(u);
-  }
-  function url(p) { return withToken(base() + p); }
+  function url(p) { return withDebug(base() + p); }
   function ws(p) {
     var proto = w.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return withToken(proto + '//' + w.location.host + base() + p);
+    return withDebug(proto + '//' + w.location.host + base() + p);
   }
 
   function xhr(method, path, body, cb) {
@@ -131,8 +121,8 @@
   }
 
   function stampLinks() {
-    var token = getToken();
     var debug = getDebug();
+    if (!debug) return;
     var as = document.getElementsByTagName('a');
     var i;
     for (i = 0; i < as.length; i++) {
@@ -140,10 +130,7 @@
       if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) continue;
       if (href.indexOf('mailto:') === 0) continue;
       var next = href;
-      if (token && next.indexOf('token=') < 0) {
-        next += (next.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
-      }
-      if (debug && next.indexOf('debug=') < 0) {
+      if (next.indexOf('debug=') < 0) {
         next += (next.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
       }
       if (next !== href) as[i].href = next;
@@ -200,7 +187,8 @@
       if (pin.length >= 4) {
         post('/api/auth/login', { pin: pin }, function (st, d) {
           if (d && d.ok) {
-            if (d.token) setToken(d.token);
+            forgetPinLabel();
+            clearLegacyToken();
             stampLinks();
             mask.className = 'pin-mask';
             revealApp();
@@ -218,8 +206,7 @@
   function ensurePin(done) {
     get('/api/auth/status', function (status, data) {
       if (data && data.authed) {
-        var t0 = getToken();
-        if (t0) setToken(t0);
+        clearLegacyToken();
         stampLinks();
         revealApp();
         if (done) done();
@@ -238,6 +225,8 @@
   function logout(done) {
     post('/api/auth/logout', {}, function () {
       try { localStorage.removeItem('tv_token'); } catch (e) {}
+      forgetPinLabel();
+      stripTokenFromAddress();
       try { document.cookie = 'tv_token=; path=/; max-age=0'; } catch (e2) {}
       showPin(done);
     });
