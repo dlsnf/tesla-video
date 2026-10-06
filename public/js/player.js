@@ -6631,7 +6631,7 @@
       chromeTimer = null;
       if (paused || ended || !playing || !videoStartWall) return;
       hideChromeOverlay();
-    }, 5000);
+    }, 3000);
   }
 
   function showChromeOverlay() {
