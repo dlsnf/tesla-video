@@ -319,6 +319,9 @@
   var nextVidBusy = false;
   var libEmpty = '결과 없음';
   var suggestCacheItem = null;
+  var suggestHoldTimer = 0;
+  var suggestHoldSeq = 0;
+  var suggestHoldForce = false;
   var signedIn = false;
   var prefGen = 0;
   var playbackDebug = !!(window.tv && window.tv.getDebug ? window.tv.getDebug() : /(?:^|[?&])debug=1(?:&|$)/.test(String(window.location.search || '')));
@@ -382,6 +385,7 @@
   var chAvatarMap = {};
   var hydrateTimer = null;
   var reqSeq = 0;
+  var playReq = 0;
   var subFeedGen = 0;
   var subPending = {};
   var subWant = {};
@@ -398,6 +402,10 @@
 
   function beginReq() { return ++reqSeq; }
   function stillReq(seq) { return seq === reqSeq; }
+  // Playback keeps its own generation. A tab or channel list must not retire
+  // an in-flight /api/media/info response, or the stage spinner never ends.
+  function beginPlay() { return ++playReq; }
+  function stillPlay(seq) { return seq === playReq; }
 
   function commentTime(ts, text) {
     if (!ts) return String(text || '작성 시간 확인 불가');
@@ -4225,7 +4233,8 @@
     }
     membersShownId = id;
     watchDetailLoading = false;
-    var playSeq = beginReq();
+    beginPlay();
+    var listSeq = opts.keepSeq ? reqSeq : beginReq();
     hideRepeatAsk();
     hideAutoAsk();
     repeatRunCount = 0;
@@ -4304,7 +4313,7 @@
       });
     }
     if (opts.keepList) markPlayingCards();
-    else showMembersList(playSeq);
+    else showMembersList(listSeq);
   }
 
   function showWatchDetailLoading(src) {
@@ -4365,7 +4374,8 @@
     }
     pendingSeekRatio = null;
     if (!opts.recovery) prerollRecoveryCount = 0;
-    var playSeq = beginReq();
+    var playSeq = beginPlay();
+    var listSeq = beginReq();
     var keepPaused = !!opts.keepPaused;
     preservedStageFrame = '';
     var keepEarlyResume = !!opts.keepEarlyResume;
@@ -4433,12 +4443,12 @@
     videoAr = 16 / 9;
 
     tv.get('/api/media/info?url=' + encodeURIComponent(src) + '&quality=' + quality, function (code, info) {
-      if (!stillReq(playSeq)) return;
+      if (!stillPlay(playSeq)) return;
       if (code === 401) {
         pipePending = false;
         soundResyncing = false;
         setStatus('PIN이 필요합니다');
-        tv.ensurePin(function () { if (stillReq(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
+        tv.ensurePin(function () { if (stillPlay(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
         return;
       }
       if (!info || !info.ok) {
@@ -4453,7 +4463,8 @@
           if (info.channel || info.uploader) known.name = known.name || info.channel || info.uploader;
           if (info.title) known.title = known.title || info.title;
           if (mid) rememberMembersHint(known);
-          showMembersWatch(src, membersHintFor(mid) || known);
+          var keepUserList = reqSeq !== listSeq;
+          showMembersWatch(src, membersHintFor(mid) || known, keepUserList ? { keepList: true, keepSeq: true } : { keepList: keepList });
           return;
         }
         watchDetailLoading = false;
@@ -4525,7 +4536,7 @@
       startPipes(src);
       if (relatedTimer) clearTimeout(relatedTimer);
       markPlayingCards();
-      if (keepList) {
+      if (keepList || reqSeq !== listSeq) {
         paintPrevButton();
         return;
       }
@@ -4534,12 +4545,12 @@
         showWatchFavs({ keepSeq: true });
       } else if (currentFeed === 'related') {
         showRelatedLoading();
-        queuePlaybackFeedRequest('related', info.id, info.title, playSeq);
+        queuePlaybackFeedRequest('related', info.id, info.title, listSeq);
       } else if (watchKeepsSubList()) {
         // The subscribed channel list is opened once the rail is ready.
       } else if (!keepOther) {
         showSuggestLoading();
-        queuePlaybackFeedRequest('suggest', info.id, '', playSeq);
+        queuePlaybackFeedRequest('suggest', info.id, '', listSeq);
       }
     });
   }
@@ -8970,14 +8981,70 @@
     openChannel(id, { keepSeq: true });
   }
 
-  function openWatchSuggestTab() {
+  // Suggest results belong to the video that finished loading. Until then the
+  // previous watchItem id is still the video being replaced.
+  function suggestTargetId() {
+    if (watchDetailLoading || pipePending) return '';
+    if ($('watchH') && $('watchH').textContent === '재생할 수 없음') return '';
+    if (!watchItem || !watchItem.id) return '';
+    if (watchItem.members) return watchItem.id;
+    if (!playing || !player || prerolling || !stagePrerollReady) return '';
+    var playingId = videoIdFromSrc(playing);
+    if (playingId && watchItem.id !== playingId) return '';
+    return watchItem.id;
+  }
+
+  function pumpSuggestHold() {
+    suggestHoldTimer = 0;
+    if (!suggestHoldSeq || !stillReq(suggestHoldSeq) || currentFeed !== 'suggest') {
+      suggestHoldSeq = 0;
+      suggestHoldForce = false;
+      return;
+    }
+    if ($('watchH') && $('watchH').textContent === '재생할 수 없음') {
+      suggestHoldSeq = 0;
+      suggestHoldForce = false;
+      if ($('relH')) $('relH').textContent = '추천 영상';
+      if (list) list.innerHTML = '<div class="notice">추천 영상을 불러오지 못했습니다</div>';
+      return;
+    }
+    var id = suggestTargetId();
+    if (!id) {
+      suggestHoldTimer = setTimeout(pumpSuggestHold, 200);
+      return;
+    }
+    var seq = suggestHoldSeq;
+    var fresh = suggestHoldForce;
+    suggestHoldSeq = 0;
+    suggestHoldForce = false;
+    if (fresh && suggestCacheItem && suggestCacheItem.id === id) suggestCacheItem = null;
+    loadSuggest(id, seq);
+  }
+
+  function requestWatchSuggest(opts) {
+    opts = opts || {};
     setChip('suggest');
     showWatchFilters();
     showSubsRail(false);
     ensureSuggestSort();
     showSuggestLoading();
-    var id = (watchItem && watchItem.id) || qsVal('v') || (readWatch() && readWatch().v) || '';
-    loadSuggest(id, beginReq());
+    if (suggestHoldTimer) { clearTimeout(suggestHoldTimer); suggestHoldTimer = 0; }
+    var seq = beginReq();
+    var id = suggestTargetId();
+    if (!id) {
+      suggestHoldSeq = seq;
+      suggestHoldForce = !!opts.fresh;
+      suggestHoldTimer = setTimeout(pumpSuggestHold, 200);
+      return;
+    }
+    suggestHoldSeq = 0;
+    suggestHoldForce = false;
+    if (opts.fresh && suggestCacheItem && suggestCacheItem.id === id) suggestCacheItem = null;
+    loadSuggest(id, seq);
+  }
+
+  function openWatchSuggestTab() {
+    requestWatchSuggest();
   }
 
   function openWatchRelatedTab() {
@@ -9023,15 +9090,7 @@
       loadRelated(id, title, relatedSeq);
       return;
     }
-    if (suggestCacheItem && (!id || suggestCacheItem.id === id)) suggestCacheItem = null;
-    var seq = beginReq();
-    setChip('suggest');
-    showWatchFilters();
-    showSubsRail(false);
-    ensureSuggestSort();
-    if ($('relH')) $('relH').textContent = '추천 영상 불러오는 중...';
-    renderSkeleton();
-    loadSuggest(id, seq);
+    requestWatchSuggest({ fresh: true });
   }
   if ($('btnListRefresh')) $('btnListRefresh').onclick = function (e) {
     if (e && e.stopPropagation) e.stopPropagation();
