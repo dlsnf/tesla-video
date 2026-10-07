@@ -245,7 +245,8 @@ body.watch-loading { background: #000; }
 .hud-back svg { width: 28px; height: 28px; fill: #fff; display: block; margin: 0; }
 .hud-title {
   flex: 1; min-width: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.3;
-  padding: 0 12px 0 0;
+  padding: 0;
+  overflow: hidden;
 }
 .hud-fps { display: none; }
 .stage-status {
@@ -379,6 +380,12 @@ body.watch-loading { background: #000; }
 .ctrl.play.is-paused .ico-pause { display: none; }
 .ctrl.play.is-paused .ico-play { display: inline; }
 .ctrl.fs { width: 44px; padding: 0; line-height: 44px; text-align: center; background: #272727; margin-right: 0; }
+.bar-bottom .watch-star {
+  flex: 0 0 44px; width: 44px; height: 44px; margin: 0 6px 0 0; padding: 0;
+  background: #272727; vertical-align: middle;
+}
+.bar-bottom .watch-star .star-svg { width: 22px; height: 22px; }
+.bar-bottom .watch-star.on { background: #272727; }
 .ctrl.fs .fs-ico { width: 22px; height: 22px; fill: #fff; vertical-align: middle; }
 .ctrl.fs .fs-exit { display: none; }
 body.player-fs .ctrl.fs .fs-enter { display: none; }
@@ -884,7 +891,9 @@ html:not(.watch-doc) .stat {
   .subs-stick { position: static; height: auto; overflow: visible; display: block; }
   .subs-rail { width: auto; overflow-x: auto; white-space: nowrap; }
   .subs-rail .sub-ch { display: inline-block; max-width: 300px; vertical-align: top; white-space: normal; }
+  .yt-thumb-wrap .star-btn { display: none; }
 }
+body.fs-feed-layer .yt-thumb-wrap .star-btn { display: none; }
 @media (min-width: 761px) {
   .subs-stick {
     position: sticky;

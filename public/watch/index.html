@@ -13,7 +13,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=179">
+<link rel="stylesheet" href="../css/app.css?v=181">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -77,6 +77,9 @@
             <button class="vol-ico" id="btnMute" type="button">♪</button>
             <input id="vol" class="vol" type="range" min="0" max="100" value="100">
           </span>
+          <button class="star-btn watch-star" id="btnFavWatch" type="button" aria-label="즐겨찾기" data-star="">
+            <svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg>
+          </button>
           <button class="ctrl fs" id="btnFs" type="button" aria-label="전체화면">
             <svg class="fs-ico fs-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
             <svg class="fs-ico fs-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
@@ -151,9 +154,6 @@
     <div class="yt-top-right">
       <button class="back" id="btnWatchReload" type="button">새로고침</button>
       <button class="back js-logout" id="btnLogout" type="button">로그아웃</button>
-      <button class="star-btn watch-star" id="btnFavWatch" type="button" aria-label="즐겨찾기" data-star="">
-        <svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 19.2 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg>
-      </button>
     </div>
     <div class="yt-top-left">
       <button class="brand yt-home" id="btnYtHome" type="button">
@@ -248,6 +248,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=139"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=333"></script>
+  <script src="../js/player.js?v=338"></script>
 </body>
 </html>
