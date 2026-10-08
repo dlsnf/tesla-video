@@ -63,14 +63,14 @@ function killProc(p) {
 
 function startYoutubePipe(info, start, format, timestampOffset) {
   var formats = {
-    '134+140': '134+140/135+140/160+139/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
-    '243+140': '243+140/134+140/160+139/bestvideo[height<=360][vcodec^=vp9]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]',
+    '134+140': '134+140/135+140/160+139/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]/18/b',
+    '243+140': '243+140/134+140/160+139/bestvideo[height<=360][vcodec^=vp9]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=360][vcodec^=avc1][acodec^=mp4a]/18/b',
   };
   // The fallback is decoded by ffmpeg before reaching the car, so it can use
   // the best source at the requested size instead of being tied to a 360p
   // H.264 itag.
   var requestedHeight = Number(info && info.quality) >= 720 ? 720 : (Number(info && info.quality) >= 480 ? 480 : 360);
-  var requestedFormat = 'bestvideo[height<=' + requestedHeight + ']+bestaudio/bv*[height<=' + requestedHeight + ']+ba/best[height<=' + requestedHeight + ']';
+  var requestedFormat = 'bestvideo[height<=' + requestedHeight + ']+bestaudio/bv*[height<=' + requestedHeight + ']+ba/best[height<=' + requestedHeight + ']/18/b';
   const extra = [
     '-f', requestedHeight > 360 ? requestedFormat : (formats[format] || formats['134+140']),
     '--merge-output-format', 'mkv',
@@ -83,7 +83,7 @@ function startYoutubePipe(info, start, format, timestampOffset) {
     extra.push('--download-sections', '*' + Math.floor(s) + '-inf');
   }
   extra.push(info.pageUrl || ('https://www.youtube.com/watch?v=' + (info.id || '')));
-  var dlArgs = media.ytdlpArgs(extra, { client: 'default', cookies: false, ignoreErrors: false });
+  var dlArgs = media.ytdlpArgs(extra, { client: 'tv,default', cookies: false, ignoreErrors: false });
   const ytdlp = spawn(config.YT_DLP, dlArgs, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   swallowErr(ytdlp.stdout);
   swallowErr(ytdlp.stderr);
