@@ -66,7 +66,8 @@ async function ytdlpRun(extra, opts) {
   opts = opts || {};
   const timeout = Math.min(Math.max(opts.timeout || 20000, 5000), 60000);
   const playlist = !!opts.playlist;
-  const tries = [
+  const explicitClients = !!opts.clients;
+  const tries = opts.clients || [
     { client: 'default', cookies: false },
     { client: 'web_embedded', cookies: false },
   ];
@@ -82,11 +83,14 @@ async function ytdlpRun(extra, opts) {
       }), { timeout: timeout });
     } catch (e) {
       last = e;
-      if (opts.cookies === true) continue;
+      if (isMembersOnly(null, e)) throw e;
+      // A listed playback client is a real fallback. Listing calls keep the
+      // old rule and stop on the first error that is not a bot check.
+      if (explicitClients || opts.cookies === true) continue;
       if (!isBotBlock(e)) throw e;
     }
   }
-  if (opts.cookies === true) throw last || new Error('no stream url');
+  if (explicitClients || opts.cookies === true) throw last || new Error('no stream url');
   throw Object.assign(new Error(botHint()), last || {});
 }
 
@@ -218,10 +222,16 @@ function pickDumpUrls(data) {
   if (!data) return null;
   var v = null;
   var a = null;
-  var req = (data.requested_formats || []).filter(function (f) { return f && !isBrokenItag(f); });
-  if (!req.length && Array.isArray(data.formats)) {
-    req = data.formats.filter(function (f) { return f && f.url && !isBrokenItag(f); });
-  }
+  var withUrl = function (list) {
+    return (list || []).filter(function (f) { return f && f.url; });
+  };
+  var req = withUrl(data.requested_formats);
+  if (!req.length && Array.isArray(data.formats)) req = withUrl(data.formats);
+  var progressive = req.filter(isBrokenItag);
+  var adaptive = req.filter(function (f) { return !isBrokenItag(f); });
+  // Format 18 is the combined 360p stream. Prefer separate tracks, and use 18
+  // only when YouTube returned no other URL (SABR clients omit the rest).
+  req = adaptive.length ? adaptive : progressive;
   if (Array.isArray(req)) {
     req.forEach(function (f) {
       if (!f || !f.url) return;
@@ -261,8 +271,15 @@ function youtubeFormatCandidatesForQuality(quality) {
     '134+140',
     '135+140',
     '160+139',
+    '18',
+    'b',
   ];
 }
+
+var PLAYBACK_CLIENTS = [
+  { client: 'tv,default', cookies: false },
+  { client: 'default', cookies: false },
+];
 
 function even(n) {
   n = Math.max(2, Math.round(n));
@@ -362,10 +379,11 @@ async function resolveSource(input, quality) {
     try {
       const result = await ytdlpRun(
         ['-f', candidateFormats[i], '-J', classified.pageUrl],
-        { timeout: 40000 }
+        { timeout: 40000, clients: PLAYBACK_CLIENTS }
       );
-      dumpJson = stripBrokenFormats(parseJsonBlob(result.stdout));
-      dump = pickDumpUrls(dumpJson);
+      var parsed = parseJsonBlob(result.stdout);
+      dump = pickDumpUrls(parsed);
+      dumpJson = stripBrokenFormats(parsed);
       if (dump && dump.video && dump.video.url) break;
       lastMetaError = new Error('no stream url');
       if (isMembersOnly(dumpJson, null)) break;
@@ -389,7 +407,7 @@ async function resolveSource(input, quality) {
     }
     if (membersHit) throw new Error('회원전용 영상입니다');
     dump = null;
-    if (lastMetaError && !isBotBlock(lastMetaError)) {
+    if (lastMetaError && lastMetaError.message !== 'no stream url' && !isBotBlock(lastMetaError)) {
       throw lastMetaError;
     }
   }
@@ -436,7 +454,7 @@ async function resolveSource(input, quality) {
     for (let i = 0; i < formatCandidates.length; i++) {
       const candidate = formatCandidates[i];
       try {
-        result = await ytdlpRun(['-f', candidate].concat(grab), { timeout: 40000 });
+        result = await ytdlpRun(['-f', candidate].concat(grab), { timeout: 40000, clients: PLAYBACK_CLIENTS });
         break;
       } catch (e) {
         lastErr = e;

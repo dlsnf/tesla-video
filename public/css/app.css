@@ -930,23 +930,31 @@ body.fs-feed-layer .yt-thumb-wrap .star-btn { display: none; }
 .rel-h { font-size: 1.1rem; font-weight: 700; margin: 8px 0 14px; color: #f1f1f1; }
 .watch-search { overflow: hidden; margin: 0 0 10px; max-width: 640px; }
 .player-box .hud-top,
-.player-box .tap-icon {
+.player-box .tap-controls {
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity .25s ease, visibility 0s linear .25s;
 }
 .player-box.overlay-on .hud-top,
-.player-box.overlay-on .tap-icon {
+.player-box.overlay-on .tap-controls {
   opacity: 1; visibility: visible;
   transition: opacity .25s ease, visibility 0s linear 0s;
 }
 .player-box.overlay-on .hud-top { pointer-events: none; }
 .player-box.overlay-on .hud-back { pointer-events: auto; }
-.player-box.overlay-on .tap-icon { pointer-events: auto; display: flex; }
-.player-box.overlay-on .tap-icon.is-covered {
+.player-box.overlay-on .tap-controls { pointer-events: none; }
+.player-box.overlay-on .tap-controls .tap-icon,
+.player-box.overlay-on .tap-controls .tap-nav { pointer-events: auto; }
+.player-box.overlay-on .tap-controls.is-covered,
+.player-box.overlay-on .tap-controls.is-covered .tap-icon,
+.player-box.overlay-on .tap-controls.is-covered .tap-nav {
   opacity: 0; visibility: hidden; pointer-events: none;
 }
-.stage-wrap:has(.stage-loader.on) .tap-icon,
-.stage-wrap:has(.stage-repeat.on) .tap-icon {
+.stage-wrap:has(.stage-loader.on) .tap-controls,
+.stage-wrap:has(.stage-repeat.on) .tap-controls,
+.stage-wrap:has(.stage-loader.on) .tap-controls .tap-icon,
+.stage-wrap:has(.stage-loader.on) .tap-controls .tap-nav,
+.stage-wrap:has(.stage-repeat.on) .tap-controls .tap-icon,
+.stage-wrap:has(.stage-repeat.on) .tap-controls .tap-nav {
   opacity: 0; visibility: hidden; pointer-events: none;
 }
 .player-box.fs .bar-bottom {
@@ -1247,17 +1255,38 @@ body.fs-feed-layer .watch-list { min-height: 0; }
   background: radial-gradient(90% 80% at 100% 50%, rgba(255,255,255,.34), rgba(255,255,255,0) 68%);
 }
 .skip-flash.on { opacity: 1; }
+.tap-controls {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 8; display: flex; align-items: center; justify-content: center;
+  gap: 20px; pointer-events: none;
+}
+.tap-nav {
+  width: 56px; height: 56px; border: 0; padding: 0; border-radius: 50%;
+  background: transparent; color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  /* filter: drop-shadow(0 0 4px rgba(0, 0, 0, .85)); */
+}
+.tap-nav .ico { width: 40px; height: 40px; fill: #fff; display: block; }
+.tap-controls .tap-nav.is-off,
+.player-box.overlay-on .tap-controls .tap-nav.is-off {
+  opacity: .35; pointer-events: none;
+}
 .tap-icon {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  position: static; transform: none; flex: 0 0 auto;
   width: 84px; height: 84px; border: 0; border-radius: 50%; padding: 0;
   background: rgba(0,0,0,.5); color: #fff;
   display: flex; align-items: center; justify-content: center;
-  z-index: 6; cursor: pointer;
+  cursor: pointer;
 }
 .tap-icon .ico { width: 44px; height: 44px; fill: #fff; display: block; }
 .tap-icon .ico-play { display: none; }
 .tap-icon.is-paused .ico-pause { display: none; }
 .tap-icon.is-paused .ico-play { display: block; }
+@media (min-width: 760px) {
+  .tap-controls { gap: 36px; }
+  .tap-nav { width: 68px; height: 68px; }
+  .tap-nav .ico { width: 44px; height: 44px; }
+}
 
 .pin-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.92);

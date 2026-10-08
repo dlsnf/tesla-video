@@ -13,7 +13,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>재생 — Tesla Video Drive</title>
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../css/app.css?v=181">
+<link rel="stylesheet" href="../css/app.css?v=182">
 <style>html, body { overflow-anchor: none; }</style>
 </head>
 <body class="watch-loading">
@@ -27,10 +27,18 @@
       <div class="tap-layer" id="tapLayer"></div>
       <div class="skip-flash skip-back" id="skipBack" aria-hidden="true"><span>-10초</span></div>
       <div class="skip-flash skip-fwd" id="skipFwd" aria-hidden="true"><span>+10초</span></div>
-      <button class="tap-icon" id="tapIcon" type="button" aria-label="일시정지">
-        <svg class="ico ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>
-        <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5z"/></svg>
-      </button>
+      <div class="tap-controls" id="tapControls">
+        <button class="tap-nav is-off" id="btnPrevVid" type="button" aria-label="이전 영상" aria-disabled="true">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/></svg>
+        </button>
+        <button class="tap-icon" id="tapIcon" type="button" aria-label="일시정지">
+          <svg class="ico ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>
+          <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5z"/></svg>
+        </button>
+        <button class="tap-nav" id="btnNextVid" type="button" aria-label="다음 영상">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+        </button>
+      </div>
       <div class="hud-top">
         <button class="hud-back" id="btnWatchBack" type="button" aria-label="뒤로">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
@@ -60,13 +68,9 @@
             <svg class="ico ico-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>
             <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5z"/></svg>
           </button>
-          <button class="ctrl icon" id="btnFromStart" type="button" aria-label="처음부터">
-            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/></svg>
-          </button>
+          <button class="ctrl" id="btnFromStart" type="button">처음부터</button>
           <button class="ctrl" id="btnBack" type="button">-10</button>
           <button class="ctrl" id="btnFwd" type="button">+10</button>
-          <button class="ctrl is-off" id="btnPrevVid" type="button" aria-disabled="true">이전재생</button>
-          <button class="ctrl" id="btnNextVid" type="button">다음재생</button>
           <button class="ctrl icon" id="btnRepeat" type="button" aria-label="반복재생" aria-pressed="false">
             <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
           </button>
@@ -248,6 +252,6 @@
 <script src="../config.js?v=133"></script>
 <script src="../js/common.js?v=139"></script>
 <script src="../js/jsmpeg.min.js?v=133"></script>
-  <script src="../js/player.js?v=340"></script>
+  <script src="../js/player.js?v=344"></script>
 </body>
 </html>
