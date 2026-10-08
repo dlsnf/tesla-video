@@ -1262,9 +1262,8 @@ body.fs-feed-layer .watch-list { min-height: 0; }
 }
 .tap-nav {
   width: 56px; height: 56px; border: 0; padding: 0; border-radius: 50%;
-  background: transparent; color: #fff; cursor: pointer;
+  background: rgba(0,0,0,.5); color: #fff; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  /* filter: drop-shadow(0 0 4px rgba(0, 0, 0, .85)); */
 }
 .tap-nav .ico { width: 40px; height: 40px; fill: #fff; display: block; }
 .tap-controls .tap-nav.is-off,

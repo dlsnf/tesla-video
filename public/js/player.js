@@ -139,6 +139,11 @@
   var nextReady = false;
   var nextLookupRestorePlayback = false;
   var nextLookupPauseOverridden = false;
+  var nextNetHold = false;
+  var netLive = [];
+  var netParked = [];
+  var origGet = tv.get;
+  var origPost = tv.post;
   var repeatTimer = null;
   var repeatAt = 0;
   var endCoastFrom = 0;
@@ -148,6 +153,71 @@
   var REPEAT_PLAY_LIMIT = 30;
   // 채널 영상 한 페이지. 한 줄이 3장이라 3의 배수로 둔다.
   var RELATED_PAGE = 12;
+
+  // While the next-video button is resolving playback, every other request waits.
+  function netFinish(rec, code, data) {
+    var at = netLive.indexOf(rec);
+    if (at >= 0) netLive.splice(at, 1);
+    if (rec.dropped) return;
+    if (rec.cb) rec.cb(code, data);
+  }
+
+  function netCall(kind, path, body, cb, essential) {
+    if (nextNetHold && !essential) {
+      netParked.push({ kind: kind, path: path, body: body, cb: cb });
+      return null;
+    }
+    var rec = { kind: kind, path: path, body: body, cb: cb, essential: !!essential, dropped: false, x: null };
+    var x = kind === 'POST'
+      ? origPost(path, body, function (code, data) { netFinish(rec, code, data); })
+      : origGet(path, function (code, data) { netFinish(rec, code, data); });
+    rec.x = x;
+    netLive.push(rec);
+    return x;
+  }
+
+  function forgetLive(x) {
+    if (!x) return;
+    var i;
+    for (i = 0; i < netLive.length; i++) {
+      if (netLive[i].x === x) {
+        netLive[i].dropped = true;
+        netLive.splice(i, 1);
+        break;
+      }
+    }
+    try { if (x.readyState !== 4) x.abort(); } catch (e) {}
+  }
+
+  function suspendForNextVideo() {
+    cancelPassivePlaybackLoads();
+    nextNetHold = true;
+    sendStreamCtrl(true, true);
+    var kept = [];
+    var i;
+    for (i = 0; i < netLive.length; i++) {
+      var rec = netLive[i];
+      if (rec.essential || (rec.x && rec.x.readyState === 4)) {
+        kept.push(rec);
+        continue;
+      }
+      rec.dropped = true;
+      netParked.push({ kind: rec.kind, path: rec.path, body: rec.body, cb: rec.cb });
+      try { if (rec.x && rec.x.readyState !== 4) rec.x.abort(); } catch (e) {}
+    }
+    netLive = kept;
+  }
+
+  function releaseNextNetHold() {
+    if (!nextNetHold && !netParked.length) return;
+    nextNetHold = false;
+    var jobs = netParked.splice(0);
+    var i;
+    for (i = 0; i < jobs.length; i++) netCall(jobs[i].kind, jobs[i].path, jobs[i].body, jobs[i].cb, false);
+  }
+
+  tv.get = function (path, cb, essential) { return netCall('GET', path, null, cb, !!essential); };
+  tv.post = function (path, body, cb, essential) { return netCall('POST', path, body, cb, !!essential); };
 
   function updateRepeatButton() {
     var button = $('btnRepeat');
@@ -2245,10 +2315,10 @@
     if (relatedTimer) { clearTimeout(relatedTimer); relatedTimer = null; }
     playbackFeedToken++;
     playbackFeedBusy = false;
-    if (playbackFeedXhr && playbackFeedXhr.readyState !== 4) playbackFeedXhr.abort();
+    forgetLive(playbackFeedXhr);
     playbackFeedXhr = null;
     subsWarmGen++;
-    if (subsWarmXhr && subsWarmXhr.readyState !== 4) subsWarmXhr.abort();
+    forgetLive(subsWarmXhr);
     subsWarmXhr = null;
     if (subsWarmId) logSubs('미리받기 중단 · 재생 이동 우선');
     subsWarmId = '';
@@ -2322,9 +2392,7 @@
 
   function abortWatchListPrefetch() {
     watchPrefetchGen++;
-    if (watchPrefetchXhr && watchPrefetchXhr.readyState !== 4) {
-      try { watchPrefetchXhr.abort(); } catch (e) {}
-    }
+    forgetLive(watchPrefetchXhr);
     watchPrefetchXhr = null;
     watchPrefetchId = '';
   }
@@ -3511,6 +3579,7 @@
 
   function sendStreamCtrl(hold, force) {
     hold = !!hold;
+    if (nextNetHold && !hold) return;
     if (streamHeld === hold && !force) return;
     var sock = streamSocket();
     if (!sock || sock.readyState !== 1) return;
@@ -3773,7 +3842,7 @@
         return;
       }
       done(null);
-    });
+    }, true);
   }
 
   function fetchNextPlaybackItem(done) {
@@ -3791,7 +3860,7 @@
     }
     tv.get('/api/youtube/suggest?id=' + encodeURIComponent(currentId) + '&pick=next', function (code, data) {
       done(nextPlayableItem((data && data.ok && data.items) || [], currentId));
-    });
+    }, true);
   }
 
   function nextItemKeepsSubscriptionOrigin(item) {
@@ -4006,6 +4075,10 @@
   }
 
   function applyStreamHold() {
+    if (nextNetHold) {
+      sendStreamCtrl(true);
+      return;
+    }
     if (ended || !player || isLive) {
       if (isLive) sendStreamCtrl(false);
       return;
@@ -4416,6 +4489,7 @@
   function showMembersWatch(src, hint, opts) {
     hint = hint || {};
     opts = opts || {};
+    releaseNextNetHold();
     var id = hint.id || videoIdFromSrc(src) || '';
     if (membersShownId && membersShownId === id && watchItem && watchItem.id === id) {
       revealMembersStage();
@@ -4643,12 +4717,14 @@
       if (code === 401) {
         pipePending = false;
         soundResyncing = false;
+        releaseNextNetHold();
         setStatus('PIN이 필요합니다');
         tv.ensurePin(function () { if (stillPlay(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
         return;
       }
       if (!info || !info.ok) {
         pipePending = false;
+        releaseNextNetHold();
         if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg';
         if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
         soundResyncing = false;
@@ -4748,7 +4824,7 @@
         showSuggestLoading();
         queuePlaybackFeedRequest('suggest', info.id, '', listSeq);
       }
-    });
+    }, nextNetHold);
   }
 
   function showRelatedLoading() {
@@ -5035,7 +5111,8 @@
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     var legacy = pipeLegacy;
     pipeLegacy = false;
-    launchPlayer(wsUrlFor(src, startAt, legacy, legacy)); //refresh=1 비활성화
+    try { launchPlayer(wsUrlFor(src, startAt, legacy, legacy)); } //refresh=1 비활성화
+    finally { releaseNextNetHold(); }
     if (paused) {
       startupPauseHeld = true;
       holdPlayback();
@@ -7727,6 +7804,7 @@
       var ahead = forward.pop();
       if (ahead && ((ahead.id && ahead.id !== id) || (!ahead.id && ahead.url))) {
         writeWatchForward(forward);
+        suspendForNextVideo();
         goWatch(ahead.id, ahead.url || (ahead.id ? ('https://www.youtube.com/watch?v=' + ahead.id) : ''), {
           viaForward: true,
           holdRun: true,
@@ -7744,7 +7822,7 @@
     nextVidBusy = true;
     nextLookupRestorePlayback = restorePlayback;
     nextLookupPauseOverridden = false;
-    cancelPassivePlaybackLoads();
+    suspendForNextVideo();
     if (restorePlayback) togglePause(true);
     setStatus('다음 영상을 불러오는 중...');
     fetchNextPlaybackItem(function (item) {
@@ -7753,6 +7831,7 @@
       if (nowId && nowId !== id) {
         nextLookupRestorePlayback = false;
         nextLookupPauseOverridden = false;
+        releaseNextNetHold();
         resumePassivePlaybackLoads();
         return;
       }
@@ -7764,6 +7843,7 @@
         var shouldResume = nextLookupRestorePlayback && !nextLookupPauseOverridden;
         nextLookupRestorePlayback = false;
         nextLookupPauseOverridden = false;
+        releaseNextNetHold();
         if (shouldResume && paused && player && !ended) togglePause();
         resumePassivePlaybackLoads();
         setStatus('다음 영상이 없습니다');
