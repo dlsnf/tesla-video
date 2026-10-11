@@ -146,6 +146,14 @@
   var origPost = tv.post;
   var repeatTimer = null;
   var repeatAt = 0;
+  // One startup load only. Pausing freezes it. Another video, a seek, or a
+  // short load somewhere else does not add to this clock.
+  var STARTUP_LOAD_LIMIT_MS = 15000;
+  var startupLoadToken = 0;
+  var startupLoadTimer = null;
+  var startupLoadLeft = 0;
+  var startupLoadTick = 0;
+  var startupLoadActive = false;
   var endCoastFrom = 0;
   var endCoastPos = 0;
   // 다음 영상 자동 재생, 반복 재생. 이 횟수만큼 끝나면 확인을 묻는다.
@@ -724,7 +732,7 @@
     var repeatMatch = String(t || '').match(/^(\d+)초 (?:후|뒤에) (?:다시 재생합니다|다음 영상을 재생합니다)$/);
     if (stageStatus) {
       var membersMsg = String(t || '') === '회원전용 영상입니다';
-      var showStageStatus = membersMsg || /재생할 수 없음|플레이어 오류/.test(String(t || ''));
+      var showStageStatus = membersMsg || /재생할 수 없|플레이어 오류/.test(String(t || ''));
       stageStatus.textContent = showStageStatus ? t : '';
       stageStatus.className = 'stage-status' + (showStageStatus ? ' on' : '') + (membersMsg ? ' members' : '');
     }
@@ -1009,7 +1017,52 @@
       el.value = '';
       el._guardQ = '';
       el._guardUntil = 0;
+      if (el._paintClear) el._paintClear();
     }
+  }
+
+  function bindSearchClear(input) {
+    if (!input || input._paintClear) return;
+    var parent = input.parentNode;
+    if (!parent) return;
+    var wrap = document.createElement('span');
+    wrap.className = 'inp-clear-wrap';
+    parent.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'inp-clear';
+    btn.hidden = true;
+    btn.setAttribute('aria-label', '검색어 지우기');
+    btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+    wrap.appendChild(btn);
+    function paint() {
+      var has = input.value.length > 0;
+      btn.className = 'inp-clear' + (has ? ' on' : '');
+      btn.hidden = !has;
+      btn.setAttribute('aria-hidden', has ? 'false' : 'true');
+    }
+    input.addEventListener('input', paint);
+    btn.onclick = function (e) {
+      if (e) {
+        if (e.preventDefault) e.preventDefault();
+        if (e.stopPropagation) e.stopPropagation();
+      }
+      input.value = '';
+      input._guardQ = '';
+      input._guardUntil = 0;
+      paint();
+      var ev;
+      try { ev = new Event('input', { bubbles: true }); }
+      catch (err) {
+        ev = document.createEvent('Event');
+        ev.initEvent('input', true, false);
+      }
+      input.dispatchEvent(ev);
+      try { input.focus(); } catch (e2) {}
+    };
+    input._paintClear = paint;
+    paint();
   }
 
   function saveBrowseState() {
@@ -1389,19 +1442,25 @@
 
   function scrollWatchResults() {
     if (!stage) return;
-    var el = $('chips') || $('relH') || list;
+    // The tabs sit under the search field. Landing on the tabs scrolls that field off the top.
+    var el = $('qWatch') || $('chips') || $('relH') || list;
     if (!el) return;
     setTimeout(function () {
       if (feedScroll && feedLayerMode && feedLayerMode !== 'flow') {
         feedScroll.scrollTop = 0;
         return;
       }
-      var y = 0, n = el;
-      while (n) {
-        y += n.offsetTop || 0;
-        n = n.offsetParent;
+      var y = 0;
+      try {
+        y = el.getBoundingClientRect().top + (window.pageYOffset || (document.documentElement && document.documentElement.scrollTop) || 0);
+      } catch (e) {
+        var n = el;
+        while (n) {
+          y += n.offsetTop || 0;
+          n = n.offsetParent;
+        }
       }
-      try { window.scrollTo(0, Math.max(0, y - 10)); } catch (e) {}
+      try { window.scrollTo(0, Math.max(0, y - 10)); } catch (e2) {}
     }, 80);
   }
 
@@ -4489,6 +4548,7 @@
   function showMembersWatch(src, hint, opts) {
     hint = hint || {};
     opts = opts || {};
+    clearStartupLoadWatch();
     releaseNextNetHold();
     var id = hint.id || videoIdFromSrc(src) || '';
     if (membersShownId && membersShownId === id && watchItem && watchItem.id === id) {
@@ -4629,10 +4689,12 @@
     var membersKnown = membersHintFor(videoIdFromSrc(src));
     if (membersKnown) {
       pipePending = false;
+      clearStartupLoadWatch();
       showMembersWatch(src, membersKnown, { keepList: keepList });
       warmOtherChannels();
       return;
     }
+    if (!opts.recovery) armStartupLoadWatch();
     membersShownId = '';
     var useLegacy = !!opts.legacy;
     if (!opts.repeat) hideRepeatAsk();
@@ -4671,6 +4733,7 @@
     if (keepPaused) {
       paused = true;
       pausePos = startAt;
+      freezeStartupLoadWatch();
     } else {
       paused = false;
       pausePos = -1;
@@ -4717,6 +4780,7 @@
       if (code === 401) {
         pipePending = false;
         soundResyncing = false;
+        clearStartupLoadWatch();
         releaseNextNetHold();
         setStatus('PIN이 필요합니다');
         tv.ensurePin(function () { if (stillPlay(playSeq) || playing === src) playUrl(src, startAt, keepPaused ? { keepPaused: true } : null); });
@@ -4724,6 +4788,7 @@
       }
       if (!info || !info.ok) {
         pipePending = false;
+        clearStartupLoadWatch();
         releaseNextNetHold();
         if ($('stageLoadingBg')) $('stageLoadingBg').className = 'stage-loading-bg';
         if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
@@ -5452,8 +5517,83 @@
     releasingSilent = false;
   }
 
+  function clearStartupLoadWatch() {
+    startupLoadToken++;
+    startupLoadActive = false;
+    startupLoadLeft = 0;
+    startupLoadTick = 0;
+    if (startupLoadTimer) { clearTimeout(startupLoadTimer); startupLoadTimer = null; }
+  }
+
+  function scheduleStartupLoadWatch() {
+    if (startupLoadTimer) { clearTimeout(startupLoadTimer); startupLoadTimer = null; }
+    var token = startupLoadToken;
+    if (!(startupLoadLeft > 0)) {
+      startupLoadTick = 0;
+      finishStartupLoadWatch(token);
+      return;
+    }
+    startupLoadTick = Date.now();
+    startupLoadTimer = setTimeout(function () { finishStartupLoadWatch(token); }, startupLoadLeft);
+  }
+
+  function armStartupLoadWatch() {
+    clearStartupLoadWatch();
+    startupLoadActive = true;
+    startupLoadLeft = STARTUP_LOAD_LIMIT_MS;
+    scheduleStartupLoadWatch();
+  }
+
+  function freezeStartupLoadWatch() {
+    if (!startupLoadActive || !startupLoadTimer) return;
+    var spent = Date.now() - startupLoadTick;
+    startupLoadLeft -= spent;
+    if (startupLoadLeft < 0) startupLoadLeft = 0;
+    clearTimeout(startupLoadTimer);
+    startupLoadTimer = null;
+    startupLoadTick = 0;
+  }
+
+  function thawStartupLoadWatch() {
+    if (!startupLoadActive || startupLoadTimer) return;
+    if (!playing || ended || videoStartWall) {
+      clearStartupLoadWatch();
+      return;
+    }
+    scheduleStartupLoadWatch();
+  }
+
+  function finishStartupLoadWatch(token) {
+    startupLoadTimer = null;
+    startupLoadTick = 0;
+    if (token !== startupLoadToken || !startupLoadActive) return;
+    if (!playing || ended || videoStartWall) {
+      clearStartupLoadWatch();
+      return;
+    }
+    if (paused) {
+      startupLoadLeft = 0;
+      return;
+    }
+    failStartupLoad();
+  }
+
+  function failStartupLoad() {
+    clearStartupLoadWatch();
+    if (!playing || ended || videoStartWall) return;
+    beginPlay();
+    watchDetailLoading = false;
+    pipePending = false;
+    stop(true);
+    blankStage();
+    if ($('npTitle') && $('npTitle').textContent === '불러오는 중...') $('npTitle').textContent = '영상을 재생할 수 없습니다';
+    if ($('watchH') && $('watchH').textContent === '불러오는 중...') $('watchH').textContent = '영상을 재생할 수 없습니다';
+    setStatus('영상을 재생할 수 없습니다');
+  }
+
   function failPreroll(msg) {
     if (!prerolling) return;
+    clearStartupLoadWatch();
     if ($('loadingCurtain')) $('loadingCurtain').className = 'loading-curtain';
     var failedMessage = msg || lastStreamErr;
     prerolling = false;
@@ -6248,6 +6388,7 @@
   }
 
   function markPlaybackStarted() {
+    clearStartupLoadWatch();
     startupPauseHeld = false;
     if (videoStartWall) return;
     videoStartWall = Date.now();
@@ -7462,6 +7603,7 @@
         pausePos = startAt || 0;
         paused = true;
         pauseWall = Date.now();
+        freezeStartupLoadWatch();
         paintPlayButton();
         applyChrome();
         showChromeOverlay();
@@ -7487,6 +7629,7 @@
       }
       paused = true;
       pauseWall = Date.now();
+      freezeStartupLoadWatch();
       holdPlayback();
       applyStreamHold();
       if (na) { try { na.pause(); } catch (e) {} }
@@ -7497,6 +7640,7 @@
       setStatus('일시정지 · 미리 받는 중');
     } else {
       paused = false;
+      thawStartupLoadWatch();
       paintPlayButton();
       applyChrome();
       if ((pipePending || watchDetailLoading) && !player) {
@@ -8176,6 +8320,7 @@
     el._guardQ = q;
     el._guardUntil = Date.now() + 500;
     if (el.value !== q) el.value = q;
+    if (el._paintClear) el._paintClear();
   }
 
   function keepSearchText(el) {
@@ -8240,10 +8385,12 @@
     doWatchSearch(($('qWatch') && $('qWatch').value) || '');
   };
   bindSearchEnter($('qWatch'), doWatchSearch);
+  bindSearchClear($('qWatch'));
   if ($('btnWatchTabSearch')) $('btnWatchTabSearch').onclick = function () {
     doWatchSearch(($('qWatchTab') && $('qWatchTab').value) || '');
   };
   bindSearchEnter($('qWatchTab'), doWatchSearch);
+  bindSearchClear($('qWatchTab'));
 
   function submitHomeSearch(raw) {
     var q = String(raw || '').trim();
@@ -8266,6 +8413,7 @@
     submitHomeSearch(($('q') && $('q').value) || '');
   };
   bindSearchEnter($('q'), submitHomeSearch);
+  bindSearchClear($('q'));
   if ($('btnAppHome')) $('btnAppHome').onclick = function () { location.href = tv.url('/?stay=1'); };
   if ($('btnYtHome')) $('btnYtHome').onclick = function (e) {
     if (e && e.preventDefault) e.preventDefault();
@@ -8357,10 +8505,6 @@
   };
   if ($('playerBox')) $('playerBox').onclick = function (e) {
     if (e.target !== this) return;
-    if (fsOn && feedLayerShown()) {
-      closeFeedLayer();
-      return;
-    }
     onEmptyTap();
   };
   function bindTap(el, fn) {
@@ -8676,11 +8820,6 @@
     }
     function onStageTap(x) {
       unlockPlaybackAudio();
-      if (feedLayerShown()) {
-        clearPendingTap();
-        closeFeedLayer();
-        return;
-      }
       var now = Date.now();
       var zone = zoneAt(x);
       if (pendingTap && (now - pendingTap.at) <= 450 && pendingTap.zone === zone) {
@@ -8908,24 +9047,9 @@
       }
       return false;
     }
-    function marginTarget(node) {
-      var box = $('playerBox');
-      return !!(box && node === box);
-    }
     function finishPageGesture(g) {
-      if (!g) return;
-      if (g.mode === 'h') {
-        endFeedDrag(g);
-        return;
-      }
-      var dx = g.x1 - g.x0;
-      var dy = g.y1 - g.y0;
-      if (dx < 0) dx = -dx;
-      if (dy < 0) dy = -dy;
-      if (dx >= 10 || dy >= 10) return;
-      if (!fsOn || !feedLayerShown() || !marginTarget(g.target)) return;
-      clearPendingTap();
-      closeFeedLayer();
+      if (!g || g.mode !== 'h') return;
+      endFeedDrag(g);
     }
     function startPageGesture(x, y, target) {
       if (!fsOn || !playerBoxOn() || !feedHost) return null;
@@ -9235,6 +9359,7 @@
     toggleSubChannel(feedSubCh || channelById(selectedCh));
   };
   if ($('subsFind')) {
+    bindSearchClear($('subsFind'));
     $('subsFind').oninput = function () {
       subsFindQ = this.value.trim();
       var vis = filteredSubList();
