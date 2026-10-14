@@ -835,7 +835,7 @@ app.get('*', function (req, res, next) {
 });
 
 const server = app.listen(config.PORT, config.BIND_HOST, function () {
-  console.log('Tesla Video Drive  http://' + config.BIND_HOST + ':' + config.PORT);
+  console.log('테슬라 비디오  http://' + config.BIND_HOST + ':' + config.PORT);
   console.log('PUBLIC_BASE=' + (config.PUBLIC_BASE || '/'));
   console.log('PIN ' + (config.ACCESS_PIN ? 'enabled' : 'disabled'));
   if (config.COOKIES_FILE) console.log('cookies: ' + config.COOKIES_FILE);

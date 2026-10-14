@@ -9,6 +9,7 @@ data/favorites/
 data/subscriptions/
 data/history/
 data/probe-reports/
+data/audio-cache/
 data/**/*.json
 
 # deps and junk

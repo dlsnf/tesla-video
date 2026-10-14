@@ -1,4 +1,4 @@
-# Tesla Video Drive (example.com)
+# 테슬라 비디오 (example.com)
 
 2022 테슬라 모델 3 롱레인지 브라우저에서 유튜브·트위치·직접 영상 URL을 재생하기 위한 서버입니다.
 
