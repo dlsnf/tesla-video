@@ -1263,9 +1263,12 @@ body.fs-feed-layer .feed-host .subs-td {
   z-index: 4;
   background: #ffffff;
   padding: 0 0 8px;
-  margin-bottom: 4px;
+  margin-bottom: 12px;
   height: auto;
   overflow: visible;
+}
+body.fs-feed-layer .feed-host .feed-split:has(.feed-sub:not([style*="display:none"]):not([style*="display: none"])) .subs-td {
+  margin-bottom: 4px;
 }
 .subs-layer-label { display: none; }
 body.fs-feed-layer .feed-host .subs-layer-label {
