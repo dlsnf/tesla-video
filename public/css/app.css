@@ -1108,8 +1108,8 @@ body.player-fs .feed-host-drag .feed-split { display: table; }
   flex: 1 1 auto;
   min-width: 0;
   font-weight: 700;
-  font-size: 1.05rem;
-  line-height: 1.2;
+  font-size: 1.35rem;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1263,6 +1263,7 @@ body.fs-feed-layer .feed-host .subs-td {
   z-index: 4;
   background: #ffffff;
   padding: 0 0 8px;
+  margin-bottom: 4px;
   height: auto;
   overflow: visible;
 }
@@ -1286,34 +1287,50 @@ body.fs-feed-layer .feed-host .subs-rail {
   overscroll-behavior: contain;
 }
 body.fs-feed-layer .feed-host .subs-rail .sub-ch {
-  display: inline-block; width: auto; min-height: 80px; padding: 0;
-  vertical-align: top; white-space: normal; margin: 0 20px 0 0;
+  display: inline-block; width: auto; min-height: 60px; padding: 0;
+  vertical-align: top; white-space: normal; margin: 0 12px 0 0;
 }
 body.fs-feed-layer .feed-host .sub-av { float: none; margin-right: 0; }
 body.fs-feed-layer .feed-host .sub-av,
 body.fs-feed-layer .feed-host .sub-av img,
 body.fs-feed-layer .feed-host .sub-letter {
-  width: 80px; height: 80px;
+  width: 60px; height: 60px;
 }
-body.fs-feed-layer .feed-host .sub-letter { line-height: 80px; font-size: 1.7rem; }
-body.fs-feed-layer .feed-host .sub-dot { left: 64px; top: 2px; }
+body.fs-feed-layer .feed-host .sub-letter { line-height: 60px; font-size: 1.3rem; }
+body.fs-feed-layer .feed-host .sub-dot { left: 44px; top: 2px; }
 body.fs-feed-layer .feed-host .sub-ch-name { display: none; }
 body.fs-feed-layer .feed-host .yt-card {
-  display: flex; align-items: flex-start; width: 100%; margin: 0 0 14px; font-size: 16px;
+  display: flex; align-items: flex-start; box-sizing: border-box;
+  width: 100%; height: 110px; margin: 0 0 14px; font-size: 16px; overflow: hidden;
 }
 body.fs-feed-layer .feed-host .yt-card:nth-child(3n) { margin-right: 0; }
 body.fs-feed-layer .feed-host .yt-thumb-wrap {
-  width: 166.4px; height: 93.6px; padding-bottom: 0; flex: 0 0 166.4px; border-radius: 10px;
+  width: calc(110px * 16 / 9); height: 110px; padding-bottom: 0;
+  flex: 0 0 calc(110px * 16 / 9); border-radius: 10px;
 }
 body.fs-feed-layer .feed-host .yt-card .t {
-  font-size: 16px; line-height: 22px; max-height: 44px;
+  font-size: 20px; line-height: 28px; max-height: 56px;
 }
 body.fs-feed-layer .feed-host .yt-card .d {
-  font-size: 14px; line-height: 20px; height: 20px;
+  margin-top: 0; font-size: 14px; line-height: 18px; height: 18px;
 }
+body.fs-feed-layer .feed-host .yt-card .d + .d { margin-top: 4px; }
+body.fs-feed-layer .feed-host .yt-card .members-only {
+  margin-top: 0; font-size: 13px; line-height: 16px;
+}
+body.fs-feed-layer .feed-host .yt-card .t + .members-only,
+body.fs-feed-layer .feed-host .yt-card .t + .d { margin-top: auto; }
 body.fs-feed-layer .feed-host .yt-dur { font-size: 0.85rem; }
+body.fs-feed-layer .feed-host .yt-card-body,
+body.fs-feed-layer .feed-host .yt-card-body > tbody,
+body.fs-feed-layer .feed-host .yt-card-body > tbody > tr {
+  display: block; height: 110px;
+}
 body.fs-feed-layer .feed-host .yt-card-body {
   flex: 1 1 auto; width: auto; min-width: 0; margin: 0 0 0 12px;
+}
+body.fs-feed-layer .feed-host .yt-card-text {
+  display: flex; flex-direction: column; height: 110px;
 }
 body.fs-feed-layer .feed-host .yt-card-av-td { display: none; }
 body.fs-feed-layer .watch-feed,
