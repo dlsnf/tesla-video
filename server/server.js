@@ -18,13 +18,7 @@ const history = require('./history');
 const prefs = require('./prefs');
 const { run } = require('./proc');
 
-if (!fs.existsSync(config.PUBLIC_DIR)) fs.mkdirSync(config.PUBLIC_DIR, { recursive: true });
 if (!fs.existsSync(config.DATA_DIR)) fs.mkdirSync(config.DATA_DIR, { recursive: true });
-
-fs.writeFileSync(
-  path.join(config.PUBLIC_DIR, 'config.js'),
-  'window.APP_BASE=' + JSON.stringify(config.PUBLIC_BASE) + ';\n'
-);
 
 const sessions = new Map();
 const SESSION_TTL = 24 * 3600 * 1000;
@@ -61,21 +55,6 @@ function parseCookies(header) {
   return out;
 }
 
-function queryToken(req) {
-  if (req.query && req.query.token) return req.query.token;
-  try {
-    const parsed = url.parse(req.url, true);
-    return (parsed.query && parsed.query.token) || '';
-  } catch (e) {
-    return '';
-  }
-}
-
-function sessionToken(req) {
-  const cookies = parseCookies(req.headers.cookie);
-  return cookies.tv_session || cookies.tv_token || queryToken(req) || req.headers['x-tv-token'] || '';
-}
-
 function tokenCandidates(req) {
   const cookies = parseCookies(req.headers.cookie);
   const list = [];
@@ -85,8 +64,6 @@ function tokenCandidates(req) {
   }
   add(cookies.tv_session);
   add(cookies.tv_token);
-  add(queryToken(req));
-  add(req.headers['x-tv-token']);
   return list;
 }
 
@@ -98,20 +75,38 @@ function acceptedToken(req) {
   return '';
 }
 
+function sessionCookiePath() {
+  const base = String(config.PUBLIC_BASE || '').replace(/\/+$/, '');
+  return base || '/';
+}
+
 function sessionCookieHeaders(token, maxAge) {
-  const base = 'Path=/; Max-Age=' + maxAge + '; HttpOnly; SameSite=Lax';
+  const scoped = 'Path=' + sessionCookiePath() + '; Max-Age=' + maxAge + '; HttpOnly; Secure; SameSite=Lax';
+  const headers = [
+    'tv_session=' + token + '; ' + scoped,
+    'tv_token=' + token + '; ' + scoped
+  ];
+  if (sessionCookiePath() !== '/') headers.push.apply(headers, clearLegacySessionCookieHeaders());
+  return headers;
+}
+
+function clearLegacySessionCookieHeaders() {
+  const plain = 'Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+  const secure = 'Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax';
   return [
-    'tv_session=' + token + '; ' + base,
-    'tv_token=' + token + '; ' + base
+    'tv_session=; ' + plain,
+    'tv_token=; ' + plain,
+    'tv_session=; ' + secure,
+    'tv_token=; ' + secure
   ];
 }
 
 function clearSessionCookieHeaders() {
-  const base = 'Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+  const scoped = 'Path=' + sessionCookiePath() + '; Max-Age=0; HttpOnly; Secure; SameSite=Lax';
   return [
-    'tv_session=; ' + base,
-    'tv_token=; ' + base
-  ];
+    'tv_session=; ' + scoped,
+    'tv_token=; ' + scoped
+  ].concat(clearLegacySessionCookieHeaders());
 }
 
 let sessionSaveTimer = null;
@@ -203,22 +198,65 @@ function isPublicApi(p) {
     || p === '/api/twitch/callback';
 }
 
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILS = 20;
+const LOGIN_STREAK = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const loginHits = new Map();
-function loginAllowed(ip) {
+
+function clientIp(req) {
+  const raw = String(req.ip || (req.socket && req.socket.remoteAddress) || '');
+  return raw.replace(/^::ffff:/i, '') || 'unknown';
+}
+
+function loginRec(ip) {
   const now = Date.now();
-  const rec = loginHits.get(ip) || { n: 0, ts: now };
-  if (now - rec.ts > 10 * 60 * 1000) {
-    rec.n = 0;
-    rec.ts = now;
+  let rec = loginHits.get(ip);
+  if (!rec) {
+    rec = { fails: 0, windowStart: now, streak: 0, lockUntil: 0 };
+    loginHits.set(ip, rec);
   }
-  rec.n += 1;
-  loginHits.set(ip, rec);
-  return rec.n <= 20;
+  if (rec.lockUntil && now >= rec.lockUntil) {
+    rec.lockUntil = 0;
+    rec.streak = 0;
+  }
+  if (now - rec.windowStart > LOGIN_WINDOW_MS) {
+    rec.fails = 0;
+    rec.windowStart = now;
+  }
+  return rec;
+}
+
+function loginBlocked(ip) {
+  const rec = loginRec(ip);
+  if (rec.lockUntil && Date.now() < rec.lockUntil) return true;
+  return rec.fails >= LOGIN_MAX_FAILS;
+}
+
+function noteLoginFailure(ip) {
+  const rec = loginRec(ip);
+  rec.fails += 1;
+  rec.streak += 1;
+  if (rec.streak >= LOGIN_STREAK) {
+    rec.lockUntil = Date.now() + LOGIN_LOCK_MS;
+    rec.streak = 0;
+  }
+  if (loginHits.size <= 2000) return;
+  const now = Date.now();
+  loginHits.forEach(function (row, key) {
+    if (row.lockUntil < now && now - row.windowStart > LOGIN_WINDOW_MS) loginHits.delete(key);
+  });
+}
+
+function noteLoginSuccess(ip) {
+  loginRec(ip).streak = 0;
 }
 
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+// Apache is the only proxy hop. Trusting every hop would honor a client-supplied
+// X-Forwarded-For value and let PIN guesses rotate the rate-limit key.
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
@@ -300,14 +338,20 @@ app.get('/api/auth/status', function (req, res) {
 });
 
 app.post('/api/auth/login', function (req, res) {
-  const ip = String(req.ip || req.connection && req.connection.remoteAddress || 'x');
-  if (!loginAllowed(ip)) {
-    return res.status(429).json({ ok: false, error: '잠시 후 다시 시도하세요' });
+  const ip = clientIp(req);
+  if (loginBlocked(ip)) {
+    return res.status(429).json({ ok: false, error: '로그인 시도가 많아 잠시 잠겼습니다' });
   }
   const pin = String((req.body && req.body.pin) || '');
   if (!favorites.validPin(pin)) {
-    return res.status(401).json({ ok: false, error: '허용된 PIN이 아닙니다' });
+    noteLoginFailure(ip);
+    const status = loginBlocked(ip) ? 429 : 401;
+    return res.status(status).json({
+      ok: false,
+      error: status === 429 ? '로그인 시도가 많아 잠시 잠겼습니다' : '허용된 PIN이 아닙니다',
+    });
   }
+  noteLoginSuccess(ip);
   const token = crypto.randomBytes(18).toString('hex');
   sessions.set(token, { pin: pin, ts: Date.now() });
   saveSessions();
@@ -332,7 +376,48 @@ app.post('/api/probe-report', function (req, res) {
   res.json({ ok: true });
 });
 
+const OAUTH_STATE_MS = 10 * 60 * 1000;
+
+function sessionRecord(req) {
+  const token = acceptedToken(req);
+  if (!token) return null;
+  const rec = sessions.get(token);
+  if (!rec || typeof rec !== 'object' || !rec.pin) return null;
+  return rec;
+}
+
+function beginAccountLink(req, provider) {
+  const rec = sessionRecord(req);
+  if (!rec) return '';
+  const state = crypto.randomBytes(16).toString('hex');
+  rec.oauth = { provider: provider, state: state, ts: Date.now() };
+  saveSessions();
+  return state;
+}
+
+function finishAccountLink(req, provider) {
+  const rec = sessionRecord(req);
+  const pending = rec && rec.oauth;
+  const state = String((req.query && req.query.state) || '');
+  if (!pending || pending.provider !== provider || pending.state !== state || !(pending.ts > 0)) return null;
+  rec.oauth = null;
+  if (Date.now() - pending.ts > OAUTH_STATE_MS) {
+    saveSessions();
+    return null;
+  }
+  saveSessions();
+  return rec;
+}
+
+function accountLinkDenied(res) {
+  return res.status(401).type('html').send(
+    '<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:24px">'
+    + '<p>PIN을 입력한 뒤 다시 연결하세요.</p></body></html>'
+  );
+}
+
 app.get('/api/twitch/login', function (req, res) {
+  if (!sessionRecord(req)) return accountLinkDenied(res);
   if (!config.TWITCH_CLIENT_ID) {
     return res.type('html').send(
       '<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:24px">'
@@ -340,38 +425,43 @@ app.get('/api/twitch/login', function (req, res) {
       + '<p>Redirect URI: <b>' + config.TWITCH_REDIRECT_URI + '</b></p></body></html>'
     );
   }
-  res.redirect(twitchOauth.loginUrl());
+  res.redirect(twitchOauth.loginUrl(beginAccountLink(req, 'twitch')));
 });
 
 app.get('/api/youtube/login', function (req, res) {
+  if (!sessionRecord(req)) return accountLinkDenied(res);
   if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET) {
     return res.redirect((config.PUBLIC_BASE || '') + '/player/?need_google=1');
   }
-  res.redirect(youtubeOauth.loginUrl());
+  res.redirect(youtubeOauth.loginUrl(beginAccountLink(req, 'youtube')));
 });
 
 app.get('/api/youtube/callback', async function (req, res) {
   const code = req.query.code;
-  if (!code) return res.status(400).send('Missing code');
+  const rec = finishAccountLink(req, 'youtube');
+  if (!code || !rec) return accountLinkDenied(res);
   try {
     const token = await youtubeOauth.exchangeCode(code);
-    if (!token.access_token) return res.send('OAuth error: ' + JSON.stringify(token));
+    if (!token.access_token) return res.status(400).send('YouTube 연결에 실패했습니다.');
     youtubeOauth.saveTokens(token);
     res.redirect((config.PUBLIC_BASE || '') + '/player/?login=yt');
   } catch (e) {
-    res.status(500).send(String(e.message));
+    res.status(500).send('YouTube 연결에 실패했습니다.');
   }
 });
 
 app.get('/api/twitch/callback', async function (req, res) {
   const code = req.query.code;
-  if (!code) return res.status(400).send('Missing code');
+  const rec = finishAccountLink(req, 'twitch');
+  if (!code || !rec) return accountLinkDenied(res);
   try {
     const token = await twitchOauth.exchangeCode(code);
-    if (!token.access_token) return res.send('OAuth error: ' + JSON.stringify(token));
-    res.redirect((config.PUBLIC_BASE || '') + '/twitch/?token=' + encodeURIComponent(token.access_token) + '&login=success');
+    if (!token.access_token) return res.status(400).send('Twitch 연결에 실패했습니다.');
+    rec.twitchAccess = token.access_token;
+    saveSessions();
+    res.redirect((config.PUBLIC_BASE || '') + '/twitch/?login=success');
   } catch (e) {
-    res.status(500).send(String(e.message));
+    res.status(500).send('Twitch 연결에 실패했습니다.');
   }
 });
 
@@ -704,6 +794,7 @@ app.get('/api/youtube/comments', async function (req, res) {
 });
 
 app.post('/api/youtube/device/start', async function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
   try {
     const data = await youtubeOauth.deviceStart();
     res.json({
@@ -720,6 +811,7 @@ app.post('/api/youtube/device/start', async function (req, res) {
 });
 
 app.post('/api/youtube/device/poll', async function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
   try {
     const data = await youtubeOauth.devicePoll(req.body && req.body.device_code);
     res.json(data);
@@ -729,6 +821,7 @@ app.post('/api/youtube/device/poll', async function (req, res) {
 });
 
 app.post('/api/youtube/cookies', function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
   const raw = String((req.body && req.body.cookies) || '').trim();
   if (raw.indexOf('youtube.com') === -1) {
     return res.status(400).json({ ok: false, error: 'youtube.com 쿠키가 없습니다. Netscape cookies.txt 형식으로 붙여 넣으세요.' });
@@ -740,7 +833,7 @@ app.post('/api/youtube/cookies', function (req, res) {
 });
 
 app.get('/api/youtube/subscriptions', async function (req, res) {
-  const gtoken = req.query.gtoken || req.headers['x-google-token'] || (await youtubeOauth.refreshAccessToken());
+  const gtoken = await youtubeOauth.refreshAccessToken();
   if (gtoken) {
     try {
       const data = await youtubeOauth.subscriptionVideos(gtoken, req.query.limit);
@@ -761,7 +854,11 @@ app.get('/api/youtube/subscriptions', async function (req, res) {
 
 app.get('/api/media/info', async function (req, res) {
   try {
-    const info = await media.resolveSource(req.query.url || req.query.id || '', req.query.quality || 480);
+    const input = req.query.url || req.query.id || '';
+    if (!media.allowedSource(input)) {
+      return res.status(400).json({ ok: false, error: 'YouTube/Twitch 주소만 조회할 수 있습니다' });
+    }
+    const info = await media.resolveSource(input, req.query.quality || 480);
     res.json({
       ok: true,
       type: info.type,
@@ -806,9 +903,10 @@ app.get('/api/twitch/status', async function (req, res) {
 });
 
 app.get('/api/twitch/follows', async function (req, res) {
-  if (!req.query.token) return res.json({ error: 'Missing token' });
+  const rec = sessionRecord(req);
+  if (!rec || !rec.twitchAccess) return res.status(401).json({ ok: false, error: 'Twitch 연결이 없습니다' });
   try {
-    const data = await twitchOauth.followedChannels(req.query.token);
+    const data = await twitchOauth.followedChannels(rec.twitchAccess);
     res.json(data);
   } catch (e) {
     res.json({ error: e.message.slice(0, 200) });

@@ -1,14 +1,7 @@
 (function (w) {
   function base() { return w.APP_BASE || ''; }
   function getToken() {
-    var t = '';
-    try { t = localStorage.getItem('tv_token') || ''; } catch (e) {}
-    if (t) return t;
-    try {
-      var q = /(?:^|[?&])token=([^&]*)/.exec(String(w.location.search || ''));
-      if (q) t = decodeURIComponent(q[1] || '');
-    } catch (e3) {}
-    return t || '';
+    return '';
   }
   function setToken() {}
   function forgetPinLabel() {
@@ -62,8 +55,6 @@
     x.withCredentials = true;
     x.timeout = 60000;
     x.setRequestHeader('Accept', 'application/json');
-    var token = getToken();
-    if (token) x.setRequestHeader('X-Tv-Token', token);
     if (body) x.setRequestHeader('Content-Type', 'application/json');
     x.onload = function () {
       var data = null;
@@ -212,12 +203,6 @@
         if (done) done();
         return;
       }
-      var token = getToken();
-      if (token && (status === 0 || !data)) {
-        revealApp();
-        if (done) done();
-        return;
-      }
       showPin(done);
     });
   }
@@ -228,6 +213,7 @@
       forgetPinLabel();
       stripTokenFromAddress();
       try { document.cookie = 'tv_token=; path=/; max-age=0'; } catch (e2) {}
+      try { document.cookie = 'tv_token=; path=/tv; max-age=0'; } catch (e3) {}
       showPin(done);
     });
   }

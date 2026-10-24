@@ -8,10 +8,14 @@ services:
       - .env
     ports:
       - "127.0.0.1:8742:8742"
+    user: "1000:1000"
+    environment:
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp
     volumes:
       - ./data:/app/data
-      - ./server:/app/server
-      - ./public:/app/public
+      - ./server:/app/server:ro
+      - ./public:/app/public:ro
       - ./.env:/app/.env:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

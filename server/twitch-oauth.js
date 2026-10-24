@@ -16,12 +16,13 @@ function httpsRequest(options, body) {
   });
 }
 
-function loginUrl() {
+function loginUrl(state) {
   return 'https://id.twitch.tv/oauth2/authorize'
     + '?client_id=' + encodeURIComponent(config.TWITCH_CLIENT_ID)
     + '&redirect_uri=' + encodeURIComponent(config.TWITCH_REDIRECT_URI)
     + '&response_type=code'
-    + '&scope=user:read:follows';
+    + '&scope=user:read:follows'
+    + '&state=' + encodeURIComponent(state || '');
 }
 
 async function exchangeCode(code) {

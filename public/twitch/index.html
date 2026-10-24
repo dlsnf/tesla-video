@@ -65,7 +65,7 @@
 </div>
 
 <script src="../config.js?v=4"></script>
-<script src="../js/common.js?v=6"></script>
+<script src="../js/common.js?v=7"></script>
 <script src="../js/jsmpeg.min.js?v=4"></script>
 <script>
 (function () {
@@ -179,30 +179,22 @@
   $('inp').onkeydown = function (e) { if (e.key === 'Enter') $('add').click(); };
   $('ref').onclick = render;
 
-  var urlToken = null;
-  var qs = window.location.search.substring(1).split('&');
-  for (var i = 0; i < qs.length; i++) {
-    var kv = qs[i].split('=');
-    if (kv[0] === 'token') urlToken = decodeURIComponent(kv[1] || '');
-  }
-
   tv.ensurePin(function () {
-    if (urlToken) {
-      localStorage.setItem('twitch_token', urlToken);
-      $('st').textContent = '로그인 성공. 팔로우 가져오는 중...';
-      tv.get('/api/twitch/follows?token=' + encodeURIComponent(urlToken), function (code, d) {
-        if (d && d.ok && d.channels) {
-          var n = 0;
-          for (var i = 0; i < d.channels.length; i++) {
-            if (chans.indexOf(d.channels[i]) === -1) { chans.push(d.channels[i]); n++; }
-          }
-          save();
-          $('st').textContent = n ? (n + '개 채널을 가져왔습니다') : '이미 목록에 있습니다';
-          render();
-          try { history.replaceState({}, '', tv.url('/twitch/')); } catch (e) {}
-        } else $('st').textContent = '오류: ' + ((d && d.error) || '?');
-      });
-    } else render();
+    var loggedIn = /(?:^|[?&])login=success(?:&|$)/.test(window.location.search);
+    if (!loggedIn) { render(); return; }
+    try { history.replaceState({}, '', tv.url('/twitch/')); } catch (e) {}
+    $('st').textContent = '로그인 성공. 팔로우 가져오는 중...';
+    tv.get('/api/twitch/follows', function (code, d) {
+      if (d && d.ok && d.channels) {
+        var n = 0;
+        for (var i = 0; i < d.channels.length; i++) {
+          if (chans.indexOf(d.channels[i]) === -1) { chans.push(d.channels[i]); n++; }
+        }
+        save();
+        $('st').textContent = n ? (n + '개 채널을 가져왔습니다') : '이미 목록에 있습니다';
+        render();
+      } else $('st').textContent = '오류: ' + ((d && d.error) || '?');
+    });
   });
 })();
 </script>

@@ -20,7 +20,7 @@ function httpsRequest(options, body) {
   });
 }
 
-function loginUrl() {
+function loginUrl(state) {
   return 'https://accounts.google.com/o/oauth2/v2/auth'
     + '?client_id=' + encodeURIComponent(config.GOOGLE_CLIENT_ID)
     + '&redirect_uri=' + encodeURIComponent(config.GOOGLE_REDIRECT_URI)
@@ -28,7 +28,8 @@ function loginUrl() {
     + '&scope=' + encodeURIComponent('https://www.googleapis.com/auth/youtube.readonly')
     + '&access_type=offline'
     + '&include_granted_scopes=true'
-    + '&prompt=select_account';
+    + '&prompt=select_account'
+    + '&state=' + encodeURIComponent(state || '');
 }
 
 async function exchangeCode(code) {

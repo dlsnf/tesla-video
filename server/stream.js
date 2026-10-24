@@ -386,12 +386,7 @@ function startAudio(info, start, fast) {
 }
 
 function allowedPlayInput(input) {
-  try {
-    const c = media.classify(input);
-    return !!(c && (c.type === 'youtube' || c.type === 'twitch' || c.type === 'test'));
-  } catch (e) {
-    return false;
-  }
+  return media.allowedSource(input);
 }
 
 function scaledVideoBitrate(quality, low, requestedScale) {

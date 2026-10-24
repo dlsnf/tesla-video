@@ -141,6 +141,15 @@ function testInfo(quality) {
   };
 }
 
+function allowedSource(input) {
+  try {
+    const c = classify(input);
+    return !!(c && (c.type === 'youtube' || c.type === 'twitch' || c.type === 'test'));
+  } catch (e) {
+    return false;
+  }
+}
+
 function classify(input) {
   const raw = String(input || '').trim();
   if (!raw) return null;
@@ -1950,6 +1959,7 @@ async function twitchStatus(channel) {
 
 module.exports = {
   classify,
+  allowedSource,
   isTestSource,
   testInfo,
   extractYoutubeId,

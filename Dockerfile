@@ -24,4 +24,6 @@ EXPOSE 8742
 HEALTHCHECK --interval=30s --timeout=8s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8742/api/health || exit 1
 
+USER node
+
 CMD ["node", "server/server.js"]

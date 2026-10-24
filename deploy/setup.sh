@@ -32,6 +32,8 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 echo "[3/6] 이미지 빌드 및 컨테이너 시작"
+mkdir -p data
+chown -R 1000:1000 data
 $COMPOSE up -d --build
 
 if [ -d /etc/httpd/conf.d ]; then
