@@ -962,13 +962,18 @@
 
   function watchKeepsSubList() {
     if (!watchSubChannel()) return false;
-    return currentFeed !== 'search' && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'favs';
+    return currentFeed !== 'search' && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'favs' && currentFeed !== 'history';
   }
+
+  var histAskId = '';
+  var histAskBusy = false;
+  var histRemoved = {};
 
   function historyGet() {
     try { return JSON.parse(localStorage.getItem('tv_hist') || '[]'); } catch (e) { return []; }
   }
   function historyAdd(item) {
+    if (item && item.id) delete histRemoved[item.id];
     var h = historyGet().filter(function (x) { return x.id !== item.id; });
     h.unshift(item);
     try { localStorage.setItem('tv_hist', JSON.stringify(h.slice(0, 24))); } catch (e) {}
@@ -981,6 +986,15 @@
       duration: item.duration || 0,
       uploader: item.uploader || ''
     }, function () {});
+    noteHistoryPlaying(item);
+  }
+
+  function dropLocalHistory(id) {
+    histRemoved[id] = true;
+    try {
+      var cur = historyGet().filter(function (x) { return x && x.id !== id; });
+      localStorage.setItem('tv_hist', JSON.stringify(cur.slice(0, 40)));
+    } catch (e) {}
   }
 
   function loadServerHistory() {
@@ -990,12 +1004,75 @@
       var map = {};
       cur.forEach(function (x) { if (x && x.id) map[x.id] = x; });
       d.items.forEach(function (x) {
-        if (!x || !x.id) return;
+        if (!x || !x.id || histRemoved[x.id]) return;
         if (!map[x.id]) cur.push(x);
       });
       try { localStorage.setItem('tv_hist', JSON.stringify(cur.slice(0, 40))); } catch (e) {}
-      if (currentFeed === 'history') render();
     });
+  }
+
+  function uniqueHistory(items) {
+    var best = {};
+    var order = [];
+    var i;
+    for (i = 0; i < (items || []).length; i++) {
+      var it = items[i];
+      if (!it || !it.id || histRemoved[it.id]) continue;
+      var ts = parseInt(it.ts, 10) || 0;
+      var prev = best[it.id];
+      if (!prev) {
+        best[it.id] = it;
+        order.push(it.id);
+        continue;
+      }
+      if (ts > (parseInt(prev.ts, 10) || 0)) best[it.id] = it;
+    }
+    var rows = [];
+    for (i = 0; i < order.length; i++) rows.push({ it: best[order[i]], i: i });
+    rows.sort(function (a, b) {
+      return ((parseInt(b.it.ts, 10) || 0) - (parseInt(a.it.ts, 10) || 0)) || (a.i - b.i);
+    });
+    var out = [];
+    for (i = 0; i < rows.length; i++) out.push(rows[i].it);
+    return out;
+  }
+
+  function listScrollY() {
+    if (feedScroll && feedLayerMode && feedLayerMode !== 'flow') return feedScroll.scrollTop || 0;
+    return pageScrollY();
+  }
+
+  function restoreListScroll(y) {
+    if (!(y > 0)) return;
+    if (feedScroll && feedLayerMode && feedLayerMode !== 'flow') {
+      feedScroll.scrollTop = y;
+      return;
+    }
+    restorePageScroll(y);
+  }
+
+  function noteHistoryPlaying(item) {
+    if (currentFeed !== 'history' || !item || !item.id || histRemoved[item.id]) return;
+    var row = {
+      id: item.id,
+      channel_id: item.channel_id || '',
+      title: item.title || '',
+      url: item.url || '',
+      thumbnail: item.thumbnail || '',
+      duration: item.duration || 0,
+      uploader: item.uploader || '',
+      views: item.views || 0,
+      ts: Date.now()
+    };
+    var next = [row];
+    for (var i = 0; i < libRaw.length; i++) {
+      if (libRaw[i] && libRaw[i].id !== row.id) next.push(libRaw[i]);
+    }
+    libRaw = next;
+    var y = listScrollY();
+    setStatus('최근 재생 ' + libRaw.length + '개');
+    applyLibView('최근 재생이 없습니다.');
+    restoreListScroll(y);
   }
 
   function looksLikeUrl(s) {
@@ -1102,6 +1179,7 @@
       restoreCh = st.selectedCh || '';
       loadSubs();
     } else if (st.feed === 'favs') loadFavs();
+    else if (st.feed === 'history') loadHistory();
     else if (st.feed === 'music') search('음악 공식 뮤직비디오', 'music');
     else if (st.feed === 'game') search('게임 실황', 'game');
     else if (st.feed === 'news') search('뉴스 헤드라인', 'news');
@@ -1208,7 +1286,7 @@
     pager.id = extra.id || '';
     pager.name = extra.name || '';
     pager.offset = 0;
-    pager.more = !!(mode && mode !== 'favs');
+    pager.more = !!(mode && mode !== 'favs' && mode !== 'history');
     pager.busy = false;
     paintMoreBar();
   }
@@ -1216,7 +1294,7 @@
   function paintMoreBar() {
     var bar = $('moreBar');
     if (!bar) return;
-    if (!pager.more || !pager.mode || pager.mode === 'favs') {
+    if (!pager.more || !pager.mode || pager.mode === 'favs' || pager.mode === 'history') {
       bar.style.display = 'none';
       return;
     }
@@ -1308,9 +1386,13 @@
     }
     html += '>';
     html += '<div class="yt-thumb-wrap"><img src="' + escapeHtml(it.thumbnail || '') + '" alt="" loading="lazy" decoding="async">';
-    if (it.id) {
+    if (it.id && currentFeed !== 'history') {
       html += '<button class="star-btn' + (favIds[it.id] ? ' on' : '') + '" type="button" data-star="' + escapeHtml(it.id) + '" aria-label="즐겨찾기">';
       html += '<svg class="star-svg" viewBox="0 0 24 24"><path d="M12 2.4l2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.3 6.6 19.2l1-6.1L3.2 8.8l6.1-.9z"/></svg></button>';
+    }
+    if (currentFeed === 'history' && it.id) {
+      html += '<button class="hist-x" type="button" data-hist-x="' + escapeHtml(it.id) + '" aria-label="최근 재생에서 지우기">';
+      html += '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>';
     }
     if (playingNow) html += '<span class="yt-now-shade" aria-hidden="true"></span><span class="yt-now">지금 재생 중</span>';
     if (dur) html += '<span class="yt-dur">' + dur + '</span>';
@@ -1323,7 +1405,12 @@
     var stats = [];
     if (viewsText) stats.push(viewsText);
     if (ago) stats.push(ago);
-    html += '<div class="d">' + escapeHtml(stats.join(' · ') || ' ') + '</div>';
+    if (currentFeed === 'history') {
+      var watched = tv.fmtAgo(it.ts);
+      if (watched) stats.push(watched + ' 재생');
+    }
+    if (stats.length) html += '<div class="d">' + escapeHtml(stats.join(' · ')) + '</div>';
+    if (it.reason) html += '<div class="d">' + escapeHtml(it.reason) + '</div>';
     html += '</td></tr></table></div>';
     return html;
   }
@@ -1366,12 +1453,12 @@
 
   function feedUsesLibView(feed) {
     return feed === 'home' || feed === 'music' || feed === 'game' || feed === 'news'
-      || feed === 'favs' || feed === 'related' || feed === 'search' || feed === 'suggest' || feed === 'subs';
+      || feed === 'favs' || feed === 'history' || feed === 'related' || feed === 'search' || feed === 'suggest' || feed === 'subs';
   }
 
   function loadMore() {
     if (pager.busy || !pager.more) return;
-    if (!pager.mode || pager.mode === 'favs') return;
+    if (!pager.mode || pager.mode === 'favs' || pager.mode === 'history') return;
     var seq = reqSeq;
     var mode = pager.mode;
     pager.busy = true;
@@ -1386,8 +1473,9 @@
         paintMoreBar();
         return;
       }
+      var pageOffset = pager.offset;
       pager.offset += add.length;
-      pager.more = data.more !== false && add.length >= 8;
+      pager.more = mode === 'home' ? data.more === true : (data.more !== false && add.length >= 8);
       if (pagerKeepsLib(mode)) {
         libRaw = libRaw.concat(add);
         if (mode === 'search') lastSearchItems = libRaw.slice();
@@ -1397,6 +1485,7 @@
         appendCards(add);
       }
       paintMoreBar();
+      if (mode === 'home' && data.quick) refreshHomeStats(seq, pageOffset);
     };
     if (pager.mode === 'home') {
       tv.get('/api/youtube/home?limit=' + limit + '&offset=' + pager.offset, done);
@@ -1573,6 +1662,8 @@
       items.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
     } else if (currentFeed === 'favs' && (libSort === 'old' || libSort === 'new')) {
       items = sortFavsBySaved(items, libSort);
+    } else if (currentFeed === 'history' && (libSort === 'old' || libSort === 'new')) {
+      items = sortHistoryByWatch(items, libSort);
     } else if (currentFeed === 'home' && (libSort === 'old' || libSort === 'new')) {
       if (libSort === 'old') items.reverse();
     } else if (libSort === 'old' || libSort === 'new') {
@@ -1633,6 +1724,24 @@
     return out;
   }
 
+  function historyWatchedAt(it) {
+    return parseInt(it && it.ts, 10) || 0;
+  }
+
+  function sortHistoryByWatch(items, mode) {
+    var indexed = [];
+    var i;
+    for (i = 0; i < items.length; i++) indexed.push({ it: items[i], i: i });
+    indexed.sort(function (a, b) {
+      var d = historyWatchedAt(a.it) - historyWatchedAt(b.it);
+      if (mode === 'new') d = -d;
+      return d || (a.i - b.i);
+    });
+    var out = [];
+    for (i = 0; i < indexed.length; i++) out.push(indexed[i].it);
+    return out;
+  }
+
   function sortTime(it) {
     if (!it) return 0;
     var uploaded = parseInt(it.uploaded, 10) || 0;
@@ -1676,7 +1785,7 @@
     if (!stage) return '';
     var id = watchSubChannel();
     if (!id) return '';
-    if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs') return '';
+    if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs' || currentFeed === 'history') return '';
     return id;
   }
 
@@ -2708,15 +2817,47 @@
           lastChannels = [];
           pager.offset = libRaw.length;
           pager.more = !!(d2 && d2.more);
+          paintMoreBar();
           applyLibView('영상을 불러오지 못했습니다');
         });
         return;
       }
-      setStatus('최근 인기');
+      setStatus(data.source === 'custom' ? '맞춤 추천' : '최근 인기');
       libRaw = (data.items || []).slice();
       pager.offset = libRaw.length;
-      pager.more = data.more !== false;
+      pager.more = data.more === true;
+      paintMoreBar();
       applyLibView('영상을 불러오지 못했습니다');
+      if (data.quick) refreshHomeStats(seq, 0);
+    });
+  }
+
+  function mergeHomeItems(items) {
+    if (!items || !items.length || currentFeed !== 'home') return;
+    var byId = {};
+    var i;
+    for (i = 0; i < items.length; i++) {
+      if (items[i] && items[i].id) byId[items[i].id] = items[i];
+    }
+    var changed = false;
+    for (i = 0; i < libRaw.length; i++) {
+      var src = libRaw[i] && byId[libRaw[i].id];
+      if (!src) continue;
+      libRaw[i] = src;
+      changed = true;
+    }
+    if (!changed) return;
+    var y = pageScrollY();
+    applyLibView('영상을 불러오지 못했습니다');
+    paintMoreBar();
+    restorePageScroll(y);
+  }
+
+  function refreshHomeStats(seq, offset) {
+    tv.get('/api/youtube/home?limit=16&offset=' + (offset || 0) + '&stats=1', function (code, data) {
+      if (!stillReq(seq) || currentFeed !== 'home') return;
+      if (!data || !data.ok || !data.items) return;
+      mergeHomeItems(data.items);
     });
   }
 
@@ -2739,6 +2880,131 @@
       libRaw = mergeHeldFavs(favItems);
       setStatus('즐겨찾기 ' + libRaw.length + '개');
       applyLibView('즐겨찾기가 없습니다.');
+    });
+  }
+
+  function loadHistory() {
+    var seq = beginReq();
+    setChip('history');
+    lastChannels = [];
+    libRaw = [];
+    resetLib();
+    showLibTools(true, 'history');
+    showSubsRail(false);
+    resetPager('history');
+    pager.more = false;
+    paintMoreBar();
+    saveBrowseState();
+    setStatus('최근 재생');
+    if (stage) renderListSpinner();
+    else renderSkeleton();
+    tv.get('/api/history', function (code, data) {
+      if (!stillReq(seq) || currentFeed !== 'history') return;
+      if (code === 401) { setStatus('PIN이 필요합니다. 새로고침 후 다시 입력하세요.'); return; }
+      if (!data || !data.ok) {
+        setStatus((data && data.error) || '최근 재생을 불러오지 못했습니다');
+        libRaw = [];
+        applyLibView('최근 재생을 불러오지 못했습니다');
+        return;
+      }
+      var fresh = uniqueHistory(data.items || []);
+      var byId = {};
+      var i;
+      for (i = 0; i < fresh.length; i++) if (fresh[i] && fresh[i].id) byId[fresh[i].id] = fresh[i];
+      for (i = 0; i < libRaw.length; i++) {
+        var row = libRaw[i];
+        if (!row || !row.id || histRemoved[row.id]) continue;
+        var prev = byId[row.id];
+        if (!prev || (parseInt(row.ts, 10) || 0) > (parseInt(prev.ts, 10) || 0)) byId[row.id] = row;
+      }
+      var merged = [];
+      var seen = {};
+      var both = libRaw.concat(fresh);
+      for (i = 0; i < both.length; i++) {
+        if (!both[i] || !both[i].id || seen[both[i].id] || histRemoved[both[i].id]) continue;
+        seen[both[i].id] = true;
+        merged.push(byId[both[i].id]);
+      }
+      libRaw = uniqueHistory(merged);
+      setStatus('최근 재생 ' + libRaw.length + '개');
+      applyLibView('최근 재생이 없습니다.');
+    });
+  }
+
+  function hideHistAsk() {
+    if (histAskBusy) return;
+    histAskId = '';
+    var el = $('histAsk');
+    if (el) el.className = 'auto-ask';
+    var yes = $('histAskYes');
+    var no = $('histAskNo');
+    if (yes) yes.disabled = false;
+    if (no) no.disabled = false;
+  }
+
+  function setHistAskError(msg) {
+    var text = $('histAskText');
+    if (text) text.textContent = msg;
+  }
+
+  function showHistAsk(id) {
+    if (!id || histAskBusy) return;
+    var item = null;
+    var i;
+    for (i = 0; i < libRaw.length; i++) {
+      if (libRaw[i] && libRaw[i].id === id) { item = libRaw[i]; break; }
+    }
+    if (!item) {
+      for (i = 0; i < lastItems.length; i++) {
+        if (lastItems[i] && lastItems[i].id === id) { item = lastItems[i]; break; }
+      }
+    }
+    histAskId = id;
+    var el = $('histAsk');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'histAsk';
+      el.className = 'auto-ask';
+      el.innerHTML = '<div class="auto-ask-box"><h2>최근 재생에서 지울까요?</h2><p id="histAskText"></p><div class="auto-ask-actions"><button type="button" class="btn btn-gray" id="histAskNo">취소</button><button type="button" class="btn btn-red" id="histAskYes">지우기</button></div></div>';
+      document.body.appendChild(el);
+      $('histAskNo').onclick = function () { hideHistAsk(); };
+      $('histAskYes').onclick = function () { confirmHistRemove(); };
+    }
+    var text = $('histAskText');
+    if (text) text.textContent = (item && item.title) || '이 영상';
+    el.className = 'auto-ask on';
+  }
+
+  function confirmHistRemove() {
+    var id = histAskId;
+    if (!id || histAskBusy) return;
+    histAskBusy = true;
+    var yes = $('histAskYes');
+    var no = $('histAskNo');
+    if (yes) yes.disabled = true;
+    if (no) no.disabled = true;
+    tv.post('/api/history/remove', { id: id }, function (code, data) {
+      histAskBusy = false;
+      if (yes) yes.disabled = false;
+      if (no) no.disabled = false;
+      if (!data || !data.ok) {
+        if (code === 401) setHistAskError('PIN이 필요합니다. 새로고침 후 다시 입력하세요.');
+        else setHistAskError((data && data.error) || '지우지 못했습니다');
+        return;
+      }
+      histAskId = '';
+      hideHistAsk();
+      dropLocalHistory(id);
+      if (currentFeed !== 'history') return;
+      var y = listScrollY();
+      var next = [];
+      for (var i = 0; i < libRaw.length; i++) {
+        if (libRaw[i] && libRaw[i].id !== id) next.push(libRaw[i]);
+      }
+      libRaw = next;
+      setStatus('최근 재생 ' + libRaw.length + '개');
+      applyLibView('최근 재생이 없습니다.');
+      restoreListScroll(y);
     });
   }
 
@@ -4511,9 +4777,9 @@
   }
 
   function showMembersList(seq) {
-    if (currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs())) return;
+    if (currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'history' || (currentFeed === 'favs' && !watchFromFavs())) return;
     if (watchKeepsSubList()) return;
-    if (watchFromFavs() && currentFeed !== 'related' && currentFeed !== 'suggest') {
+    if (watchFromFavs() && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'history') {
       showWatchFavs({ keepSeq: true });
       return;
     }
@@ -4811,7 +5077,7 @@
         if ($('chRow')) $('chRow').style.display = 'none';
         if ($('commentsBox')) $('commentsBox').style.display = 'none';
         if ($('btnSub')) $('btnSub').disabled = false;
-        if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest') showWatchFavs({ keepSeq: true });
+        if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'history') showWatchFavs({ keepSeq: true });
         return;
       }
       durationSource = src;
@@ -4877,8 +5143,8 @@
         paintPrevButton();
         return;
       }
-      var keepOther = currentFeed === 'search' || currentFeed === 'subs' || (currentFeed === 'favs' && !watchFromFavs());
-      if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest') {
+      var keepOther = currentFeed === 'search' || currentFeed === 'subs' || currentFeed === 'history' || (currentFeed === 'favs' && !watchFromFavs());
+      if (watchFromFavs() && currentFeed !== 'search' && currentFeed !== 'subs' && currentFeed !== 'related' && currentFeed !== 'suggest' && currentFeed !== 'history') {
         showWatchFavs({ keepSeq: true });
       } else if (currentFeed === 'related') {
         showRelatedLoading();
@@ -9319,6 +9585,14 @@
     };
     list.onclick = function (e) {
     var el = e.target;
+    var histX = e.target;
+    while (histX && histX !== list && !(histX.getAttribute && histX.getAttribute('data-hist-x'))) histX = histX.parentNode;
+    if (histX && histX !== list && histX.getAttribute('data-hist-x')) {
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+      showHistAsk(histX.getAttribute('data-hist-x'));
+      return;
+    }
     var star = e.target;
     while (star && star !== list && !(star.getAttribute && star.getAttribute('data-star'))) star = star.parentNode;
     if (star && star !== list && star.getAttribute('data-star')) {
@@ -9561,7 +9835,7 @@
       }
       return;
     }
-    if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs') return;
+    if (currentFeed === 'search' || currentFeed === 'related' || currentFeed === 'suggest' || currentFeed === 'favs' || currentFeed === 'history') return;
     if (!subChannelById(id)) {
       feedSubListPending = false;
       if (selectedCh === id) {
@@ -9822,6 +10096,10 @@
       showWatchFavs({ fresh: true });
       return;
     }
+    if (currentFeed === 'history') {
+      loadHistory();
+      return;
+    }
     if (currentFeed === 'search') {
       var q = lastQuery || (($('qWatchTab') && $('qWatchTab').value) || (($('qWatch') && $('qWatch').value) || ''));
       if (q) search(q, 'search');
@@ -9869,12 +10147,14 @@
         else if (feed === 'search') openWatchSearchTab();
         else if (feed === 'subs') loadSubs();
         else if (feed === 'favs') showWatchFavs();
+        else if (feed === 'history') loadHistory();
       });
       return;
     }
     if (feed === 'home') loadHome();
     else if (feed === 'subs') loadSubs();
     else if (feed === 'favs') loadFavs();
+    else if (feed === 'history') loadHistory();
     else if (feed === 'music') search('음악 공식 뮤직비디오', 'music');
     else if (feed === 'game') search('게임 실황', 'game');
     else if (feed === 'news') search('뉴스 헤드라인', 'news');
@@ -9887,7 +10167,14 @@
   });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && fsOn) setFs(false);
+    if (e.key === 'Escape') {
+      var histAsk = $('histAsk');
+      if (histAsk && histAsk.className.indexOf('on') >= 0) {
+        hideHistAsk();
+        return;
+      }
+      if (fsOn) setFs(false);
+    }
     var el = e.target;
     var tag = el && el.tagName ? el.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || tag === 'select' || (el && el.isContentEditable)) return;

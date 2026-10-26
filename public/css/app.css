@@ -724,6 +724,13 @@ html:not(.watch-doc) .stat {
 .yt-thumb-wrap .star-btn {
   position: absolute; top: 8px; right: 8px; z-index: 3;
 }
+.hist-x {
+  position: absolute; top: 8px; right: 8px; z-index: 4;
+  width: 40px; height: 40px; padding: 0; border: 0; border-radius: 20px;
+  background: rgba(0, 0, 0, .62); color: #fff; cursor: pointer; line-height: 0;
+}
+.hist-x svg { width: 18px; height: 18px; display: block; margin: 0 auto; }
+.hist-x:active { opacity: .7; }
 .watch-star { float: none; margin-top: 0; vertical-align: middle; display: inline-block; }
 .yt-top-right .watch-star { background: #272727; }
 .ch-row {
@@ -1165,7 +1172,7 @@ body.player-fs .feed-host-drag .feed-split { display: table; }
   color: #0f0f0f;
 }
 .feed-host-open .feed-layer-head,
-.feed-host-drag .feed-layer-head { display: flex; }
+.feed-host-drag .feed-layer-head { display: flex; position: relative; z-index: 6; }
 .feed-host-open .feed-layer-close,
 .feed-host-drag .feed-layer-close { display: block; }
 .feed-host-park .chip,
@@ -1260,7 +1267,7 @@ body.fs-feed-layer .feed-host .feed-td {
 body.fs-feed-layer .feed-host .subs-td {
   position: sticky;
   top: 0;
-  z-index: 4;
+  z-index: 5;
   background: #ffffff;
   padding: 0 0 8px;
   margin-bottom: 12px;
@@ -1304,6 +1311,7 @@ body.fs-feed-layer .feed-host .sub-dot { left: 44px; top: 2px; }
 body.fs-feed-layer .feed-host .sub-ch-name { display: none; }
 body.fs-feed-layer .feed-host .yt-card {
   display: flex; align-items: flex-start; box-sizing: border-box;
+  position: relative; z-index: 0;
   width: 100%; min-height: 110px; height: auto; margin: 0 0 14px; font-size: 16px;
 }
 body.fs-feed-layer .feed-host .yt-card:nth-child(3n) { margin-right: 0; }
@@ -1312,7 +1320,10 @@ body.fs-feed-layer .feed-host .yt-thumb-wrap {
   flex: 0 0 calc(110px * 16 / 9); border-radius: 10px;
 }
 body.fs-feed-layer .feed-host .yt-card .t {
-  font-size: 20px; line-height: 24px; max-height: 56px;
+  flex: 0 1 auto; min-height: 0;
+  font-size: 18px; line-height: 24px; max-height: 48px;
+  overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
 }
 body.fs-feed-layer .feed-host .yt-card .d,
 body.fs-feed-layer .feed-host .yt-card .members-only {
@@ -1329,7 +1340,7 @@ body.fs-feed-layer .feed-host .yt-card-body {
 }
 body.fs-feed-layer .feed-host .yt-card-text {
   display: flex; flex-direction: column; justify-content: flex-start;
-  gap: 4px; height: auto;
+  gap: 4px; height: auto; min-width: 0; overflow: hidden;
 }
 body.fs-feed-layer .feed-host .yt-card-av-td { display: none; }
 body.fs-feed-layer .watch-feed,

@@ -1879,24 +1879,32 @@ async function youtubeChannelVideos(channelId, limit, name, offset, opts) {
   const cached = cacheGet(searchCache, key, 10 * 60 * 1000);
   if (cached) return cached;
   let items = [];
-  if (String(channelId || '').indexOf('UC') === 0) {
+  // Home's first paint asks for a short page. Innertube avoids a 30-video yt-dlp read.
+  if (opts.fast && !off && String(channelId || '').indexOf('UC') === 0) {
+    try { items = await innertubeChannelVideos(channelId, n); } catch (e) { items = []; }
+    if ((!items || !items.length) && url) {
+      try { items = await youtubeFeed(url, n, 6000, 0); } catch (e) { items = []; }
+    }
+  } else if (String(channelId || '').indexOf('UC') === 0) {
     try { items = await channelNewest(channelId, off, n, ''); } catch (e) { items = []; }
   }
-  if ((!items || !items.length) && !off && String(channelId || '').indexOf('UC') === 0) {
-    try { items = await innertubeChannelVideos(channelId, n); } catch (e) { items = []; }
-  }
-  if ((!items || !items.length) && url) {
-    try { items = await youtubeFeed(url, n, 8000, off); } catch (e) { items = []; }
-  }
-  if ((!items || !items.length) && name) {
-    try { items = await searchYoutube(name, n, off); } catch (e) { items = []; }
+  if (!opts.fast) {
+    if ((!items || !items.length) && !off && String(channelId || '').indexOf('UC') === 0) {
+      try { items = await innertubeChannelVideos(channelId, n); } catch (e) { items = []; }
+    }
+    if ((!items || !items.length) && url) {
+      try { items = await youtubeFeed(url, n, 8000, off); } catch (e) { items = []; }
+    }
+    if ((!items || !items.length) && name) {
+      try { items = await searchYoutube(name, n, off); } catch (e) { items = []; }
+    }
   }
   (items || []).forEach(function (it) {
     if (!it) return;
     if (channelId && !it.channel_id) it.channel_id = String(channelId);
     if (name && !it.uploader) it.uploader = name;
   });
-  cacheSet(searchCache, key, items || []);
+  if ((items && items.length) || !opts.fast) cacheSet(searchCache, key, items || []);
   return items || [];
 }
 

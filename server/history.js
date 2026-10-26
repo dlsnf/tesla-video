@@ -50,6 +50,16 @@ function record(pin, body) {
   return { ok: true };
 }
 
+function remove(pin, id) {
+  if (!favorites.validPin(pin)) return { ok: false, error: 'PIN 없음' };
+  const videoId = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  if (!videoId) return { ok: false, error: 'id 없음' };
+  const list = read(pin);
+  const next = list.filter(function (it) { return !it || it.id !== videoId; });
+  if (next.length !== list.length) write(pin, next);
+  return { ok: true };
+}
+
 function countsByChannel(pin, sinceMs) {
   const since = sinceMs || (Date.now() - SIX_MONTHS);
   const counts = {};
@@ -61,4 +71,4 @@ function countsByChannel(pin, sinceMs) {
   return counts;
 }
 
-module.exports = { read, write, record, countsByChannel, SIX_MONTHS };
+module.exports = { read, write, record, remove, countsByChannel, SIX_MONTHS };

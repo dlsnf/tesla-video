@@ -16,6 +16,7 @@ const favorites = require('./favorites');
 const subscriptions = require('./subscriptions');
 const history = require('./history');
 const prefs = require('./prefs');
+const recommend = require('./recommend');
 const { run } = require('./proc');
 
 if (!fs.existsSync(config.DATA_DIR)) fs.mkdirSync(config.DATA_DIR, { recursive: true });
@@ -535,6 +536,14 @@ app.post('/api/history/watch', function (req, res) {
   res.json(out);
 });
 
+app.post('/api/history/remove', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = history.remove(pin, (req.body && req.body.id) || '');
+  if (!out.ok) return res.status(400).json(out);
+  res.json(out);
+});
+
 app.get('/api/subscriptions', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
@@ -645,6 +654,21 @@ app.get('/api/youtube/home', async function (req, res) {
   try {
     const n = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 40);
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const pin = sessionPin(req);
+    const wantStats = String(req.query.stats || '') === '1';
+    if (pin) {
+      const custom = await recommend.home(pin, n, offset, { stats: wantStats });
+      if (custom) {
+        if (wantStats && custom.items && custom.items.length) await media.fillItemStats(custom.items);
+        return res.json({
+          ok: true,
+          source: 'custom',
+          quick: !wantStats,
+          items: custom.items || [],
+          more: !!custom.more,
+        });
+      }
+    }
     if (offset > 0) {
       const extra = await media.youtubeHome(n, offset);
       await media.fillItemStats(extra);
