@@ -1,0 +1,1019 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const express = require('express');
+const { WebSocketServer } = require('ws');
+const url = require('url');
+
+const config = require('./config');
+const media = require('./media');
+const stream = require('./stream');
+const twitchOauth = require('./twitch-oauth');
+const youtubeOauth = require('./youtube-oauth');
+const favorites = require('./favorites');
+const subscriptions = require('./subscriptions');
+const history = require('./history');
+const prefs = require('./prefs');
+const recommend = require('./recommend');
+const { run } = require('./proc');
+
+if (!fs.existsSync(config.DATA_DIR)) fs.mkdirSync(config.DATA_DIR, { recursive: true });
+
+const sessions = new Map();
+const SESSION_TTL = 24 * 3600 * 1000;
+const SESSION_COOKIE_AGE = 24 * 3600;
+const SESSION_FILE = path.join(config.DATA_DIR, 'sessions.json');
+const healthCache = { ts: 0, value: null, pending: null };
+const HEALTH_TTL = 30000;
+
+function loadSessions() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    Object.keys(raw || {}).forEach(function (k) {
+      if (raw[k]) sessions.set(k, raw[k]);
+    });
+  } catch (e) {}
+}
+function saveSessions() {
+  const obj = {};
+  sessions.forEach(function (v, k) { obj[k] = v; });
+  try {
+    fs.mkdirSync(config.DATA_DIR, { recursive: true });
+    fs.writeFileSync(SESSION_FILE, JSON.stringify(obj));
+  } catch (e) {}
+}
+loadSessions();
+
+function parseCookies(header) {
+  const out = {};
+  String(header || '').split(';').forEach(function (part) {
+    const i = part.indexOf('=');
+    if (i === -1) return;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  });
+  return out;
+}
+
+function tokenCandidates(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const list = [];
+  function add(value) {
+    const token = String(value || '');
+    if (token && list.indexOf(token) < 0) list.push(token);
+  }
+  add(cookies.tv_session);
+  add(cookies.tv_token);
+  return list;
+}
+
+function acceptedToken(req) {
+  const list = tokenCandidates(req);
+  for (var i = 0; i < list.length; i++) {
+    if (touchSession(list[i])) return list[i];
+  }
+  return '';
+}
+
+function sessionCookiePath() {
+  const base = String(config.PUBLIC_BASE || '').replace(/\/+$/, '');
+  return base || '/';
+}
+
+function sessionCookieHeaders(token, maxAge) {
+  const scoped = 'Path=' + sessionCookiePath() + '; Max-Age=' + maxAge + '; HttpOnly; Secure; SameSite=Lax';
+  const headers = [
+    'tv_session=' + token + '; ' + scoped,
+    'tv_token=' + token + '; ' + scoped
+  ];
+  if (sessionCookiePath() !== '/') headers.push.apply(headers, clearLegacySessionCookieHeaders());
+  return headers;
+}
+
+function clearLegacySessionCookieHeaders() {
+  const plain = 'Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+  const secure = 'Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax';
+  return [
+    'tv_session=; ' + plain,
+    'tv_token=; ' + plain,
+    'tv_session=; ' + secure,
+    'tv_token=; ' + secure
+  ];
+}
+
+function clearSessionCookieHeaders() {
+  const scoped = 'Path=' + sessionCookiePath() + '; Max-Age=0; HttpOnly; Secure; SameSite=Lax';
+  return [
+    'tv_session=; ' + scoped,
+    'tv_token=; ' + scoped
+  ].concat(clearLegacySessionCookieHeaders());
+}
+
+let sessionSaveTimer = null;
+function scheduleSaveSessions() {
+  if (sessionSaveTimer) return;
+  sessionSaveTimer = setTimeout(function () {
+    sessionSaveTimer = null;
+    saveSessions();
+  }, 5000);
+  if (sessionSaveTimer.unref) sessionSaveTimer.unref();
+}
+
+function flushSessions() {
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+  }
+  saveSessions();
+}
+
+// Activity, including an open playback socket, moves the 24h window forward.
+// A quiet day still ends the session on the next request.
+function touchSession(token) {
+  if (!token) return false;
+  const rec = sessions.get(token);
+  if (!rec) return false;
+  const ts = typeof rec === 'number' ? rec : rec.ts;
+  if (!(ts > 0) || Date.now() - ts > SESSION_TTL) {
+    sessions.delete(token);
+    scheduleSaveSessions();
+    return false;
+  }
+  if (typeof rec !== 'number' && rec.pin && !favorites.validPin(rec.pin)) {
+    sessions.delete(token);
+    scheduleSaveSessions();
+    return false;
+  }
+  const now = Date.now();
+  if (typeof rec === 'number') sessions.set(token, { pin: '', ts: now });
+  else rec.ts = now;
+  scheduleSaveSessions();
+  return true;
+}
+
+function sessionOf(req) {
+  const token = acceptedToken(req);
+  if (!token) return null;
+  const rec = sessions.get(token);
+  return typeof rec === 'number' ? { pin: '', ts: rec } : rec;
+}
+
+function keepSessionAlive(req, ws) {
+  const token = acceptedToken(req);
+  if (!token) return;
+  const timer = setInterval(function () {
+    if (!ws || ws.readyState !== 1) return;
+    if (!touchSession(token)) {
+      try { ws.close(); } catch (e) {}
+    }
+  }, 60 * 1000);
+  if (timer.unref) timer.unref();
+  ws.on('close', function () {
+    clearInterval(timer);
+    touchSession(token);
+  });
+}
+
+function isAuthed(req) {
+  return !!sessionOf(req);
+}
+
+function sessionPin(req) {
+  const rec = sessionOf(req);
+  return rec && rec.pin ? rec.pin : '';
+}
+
+function requireAuth(req, res, next) {
+  if (isAuthed(req)) return next();
+  return res.status(401).json({ ok: false, error: 'PIN required' });
+}
+
+function isPublicApi(p) {
+  return p === '/api/health'
+    || p === '/api/auth/status'
+    || p === '/api/auth/login'
+    || p === '/api/youtube/login'
+    || p === '/api/youtube/callback'
+    || p === '/api/twitch/login'
+    || p === '/api/twitch/callback';
+}
+
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILS = 20;
+const LOGIN_STREAK = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const loginHits = new Map();
+
+function clientIp(req) {
+  const raw = String(req.ip || (req.socket && req.socket.remoteAddress) || '');
+  return raw.replace(/^::ffff:/i, '') || 'unknown';
+}
+
+function loginRec(ip) {
+  const now = Date.now();
+  let rec = loginHits.get(ip);
+  if (!rec) {
+    rec = { fails: 0, windowStart: now, streak: 0, lockUntil: 0 };
+    loginHits.set(ip, rec);
+  }
+  if (rec.lockUntil && now >= rec.lockUntil) {
+    rec.lockUntil = 0;
+    rec.streak = 0;
+  }
+  if (now - rec.windowStart > LOGIN_WINDOW_MS) {
+    rec.fails = 0;
+    rec.windowStart = now;
+  }
+  return rec;
+}
+
+function loginBlocked(ip) {
+  const rec = loginRec(ip);
+  if (rec.lockUntil && Date.now() < rec.lockUntil) return true;
+  return rec.fails >= LOGIN_MAX_FAILS;
+}
+
+function noteLoginFailure(ip) {
+  const rec = loginRec(ip);
+  rec.fails += 1;
+  rec.streak += 1;
+  if (rec.streak >= LOGIN_STREAK) {
+    rec.lockUntil = Date.now() + LOGIN_LOCK_MS;
+    rec.streak = 0;
+  }
+  if (loginHits.size <= 2000) return;
+  const now = Date.now();
+  loginHits.forEach(function (row, key) {
+    if (row.lockUntil < now && now - row.windowStart > LOGIN_WINDOW_MS) loginHits.delete(key);
+  });
+}
+
+function noteLoginSuccess(ip) {
+  loginRec(ip).streak = 0;
+}
+
+const app = express();
+app.disable('x-powered-by');
+// Apache is the only proxy hop. Trusting every hop would honor a client-supplied
+// X-Forwarded-For value and let PIN guesses rotate the rate-limit key.
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false }));
+
+app.use(function (req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  next();
+});
+
+app.use(function (req, res, next) {
+  if (req.path.indexOf('/api/') !== 0) return next();
+  const token = acceptedToken(req);
+  if (token) res.setHeader('Set-Cookie', sessionCookieHeaders(token, SESSION_COOKIE_AGE));
+  next();
+});
+
+app.use(function (req, res, next) {
+  if (req.path.indexOf('/api/') !== 0 || isPublicApi(req.path)) return next();
+  return requireAuth(req, res, next);
+});
+
+app.get('/config.js', function (req, res) {
+  res.type('application/javascript').send('window.APP_BASE=' + JSON.stringify(config.PUBLIC_BASE) + ';\n');
+});
+
+app.get('/api/health', async function (req, res) {
+  if (healthCache.value && Date.now() - healthCache.ts < HEALTH_TTL) {
+    return res.json(Object.assign({}, healthCache.value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  }
+  if (healthCache.pending) {
+    const value = await healthCache.pending;
+    return res.json(Object.assign({}, value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  }
+  healthCache.pending = (async function () {
+  let ffmpegOk = false;
+  let ytdlpOk = false;
+  try {
+    await run(config.FFMPEG, ['-version'], { timeout: 5000 });
+    ffmpegOk = true;
+  } catch (e) {}
+  try {
+    await run(config.YT_DLP, ['--version'], { timeout: 5000 });
+    ytdlpOk = true;
+  } catch (e) {}
+  return {
+    ok: ffmpegOk && ytdlpOk,
+    ffmpeg: ffmpegOk,
+    ytdlp: ytdlpOk,
+    pin: true,
+    base: config.PUBLIC_BASE || '/',
+    youtubeOauth: !!(config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET),
+    youtubeApi: !!config.GOOGLE_API_KEY,
+    cookies: !!config.getCookiesFile(),
+  };
+  })();
+  try {
+    const value = await healthCache.pending;
+    healthCache.ts = Date.now();
+    healthCache.value = value;
+    res.json(Object.assign({}, value, {
+      streams: stream.activeCount(),
+      maxStreams: config.MAX_STREAMS,
+    }));
+  } finally {
+    healthCache.pending = null;
+  }
+});
+
+app.get('/api/auth/status', function (req, res) {
+  const rec = sessionOf(req);
+  res.json({ ok: true, required: true, authed: !!rec });
+});
+
+app.post('/api/auth/login', function (req, res) {
+  const ip = clientIp(req);
+  if (loginBlocked(ip)) {
+    return res.status(429).json({ ok: false, error: '로그인 시도가 많아 잠시 잠겼습니다' });
+  }
+  const pin = String((req.body && req.body.pin) || '');
+  if (!favorites.validPin(pin)) {
+    noteLoginFailure(ip);
+    const status = loginBlocked(ip) ? 429 : 401;
+    return res.status(status).json({
+      ok: false,
+      error: status === 429 ? '로그인 시도가 많아 잠시 잠겼습니다' : '허용된 PIN이 아닙니다',
+    });
+  }
+  noteLoginSuccess(ip);
+  const token = crypto.randomBytes(18).toString('hex');
+  sessions.set(token, { pin: pin, ts: Date.now() });
+  saveSessions();
+  res.setHeader('Set-Cookie', sessionCookieHeaders(token, SESSION_COOKIE_AGE));
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/logout', function (req, res) {
+  const token = acceptedToken(req);
+  if (token) sessions.delete(token);
+  saveSessions();
+  res.setHeader('Set-Cookie', clearSessionCookieHeaders());
+  res.json({ ok: true });
+});
+
+app.post('/api/probe-report', function (req, res) {
+  const reportsDir = path.join(config.DATA_DIR, 'probe-reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = path.join(reportsDir, 'probe-' + timestamp + '.json');
+  fs.writeFileSync(filename, JSON.stringify(req.body || {}, null, 2));
+  res.json({ ok: true });
+});
+
+const OAUTH_STATE_MS = 10 * 60 * 1000;
+
+function sessionRecord(req) {
+  const token = acceptedToken(req);
+  if (!token) return null;
+  const rec = sessions.get(token);
+  if (!rec || typeof rec !== 'object' || !rec.pin) return null;
+  return rec;
+}
+
+function beginAccountLink(req, provider) {
+  const rec = sessionRecord(req);
+  if (!rec) return '';
+  const state = crypto.randomBytes(16).toString('hex');
+  rec.oauth = { provider: provider, state: state, ts: Date.now() };
+  saveSessions();
+  return state;
+}
+
+function finishAccountLink(req, provider) {
+  const rec = sessionRecord(req);
+  const pending = rec && rec.oauth;
+  const state = String((req.query && req.query.state) || '');
+  if (!pending || pending.provider !== provider || pending.state !== state || !(pending.ts > 0)) return null;
+  rec.oauth = null;
+  if (Date.now() - pending.ts > OAUTH_STATE_MS) {
+    saveSessions();
+    return null;
+  }
+  saveSessions();
+  return rec;
+}
+
+function accountLinkDenied(res) {
+  return res.status(401).type('html').send(
+    '<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:24px">'
+    + '<p>PIN을 입력한 뒤 다시 연결하세요.</p></body></html>'
+  );
+}
+
+app.get('/api/twitch/login', function (req, res) {
+  if (!sessionRecord(req)) return accountLinkDenied(res);
+  if (!config.TWITCH_CLIENT_ID) {
+    return res.type('html').send(
+      '<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:24px">'
+      + '<h1>Twitch 로그인</h1><p>.env 에 TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET 을 넣으세요.</p>'
+      + '<p>Redirect URI: <b>' + config.TWITCH_REDIRECT_URI + '</b></p></body></html>'
+    );
+  }
+  res.redirect(twitchOauth.loginUrl(beginAccountLink(req, 'twitch')));
+});
+
+app.get('/api/youtube/login', function (req, res) {
+  if (!sessionRecord(req)) return accountLinkDenied(res);
+  if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET) {
+    return res.redirect((config.PUBLIC_BASE || '') + '/player/?need_google=1');
+  }
+  res.redirect(youtubeOauth.loginUrl(beginAccountLink(req, 'youtube')));
+});
+
+app.get('/api/youtube/callback', async function (req, res) {
+  const code = req.query.code;
+  const rec = finishAccountLink(req, 'youtube');
+  if (!code || !rec) return accountLinkDenied(res);
+  try {
+    const token = await youtubeOauth.exchangeCode(code);
+    if (!token.access_token) return res.status(400).send('YouTube 연결에 실패했습니다.');
+    youtubeOauth.saveTokens(token);
+    res.redirect((config.PUBLIC_BASE || '') + '/player/?login=yt');
+  } catch (e) {
+    res.status(500).send('YouTube 연결에 실패했습니다.');
+  }
+});
+
+app.get('/api/twitch/callback', async function (req, res) {
+  const code = req.query.code;
+  const rec = finishAccountLink(req, 'twitch');
+  if (!code || !rec) return accountLinkDenied(res);
+  try {
+    const token = await twitchOauth.exchangeCode(code);
+    if (!token.access_token) return res.status(400).send('Twitch 연결에 실패했습니다.');
+    rec.twitchAccess = token.access_token;
+    saveSessions();
+    res.redirect((config.PUBLIC_BASE || '') + '/twitch/?login=success');
+  } catch (e) {
+    res.status(500).send('Twitch 연결에 실패했습니다.');
+  }
+});
+
+app.use('/api', requireAuth);
+
+app.get('/api/youtube/status', function (req, res) {
+  res.json({
+    ok: true,
+    oauth: !!(config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET),
+    apiKey: !!config.GOOGLE_API_KEY,
+    cookies: !!config.getCookiesFile(),
+    saved: youtubeOauth.hasSavedLogin(),
+  });
+});
+
+app.get('/api/prefs', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const saved = prefs.read(pin);
+  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
+});
+
+app.post('/api/prefs', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const saved = prefs.write(pin, req.body || {});
+  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
+});
+
+app.get('/api/favorites', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const items = favorites.read(pin);
+  const savedAt = {};
+  for (var i = 0; i < items.length; i++) {
+    if (items[i] && items[i].id) savedAt[items[i].id] = parseInt(items[i].ts, 10) || 0;
+  }
+  try {
+    await media.fillItemStats(items);
+    favorites.rememberStats(pin, items);
+  } catch (e) {}
+  for (var j = 0; j < items.length; j++) {
+    if (!items[j] || !items[j].id) continue;
+    var saved = savedAt[items[j].id] || 0;
+    if (!saved) continue;
+    items[j].saved = saved;
+    items[j].ts = saved;
+  }
+  res.json({ ok: true, items: items });
+});
+
+app.post('/api/favorites/toggle', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = favorites.toggle(pin, req.body || {});
+  if (!out.ok) return res.status(400).json(out);
+  res.json(out);
+});
+
+app.get('/api/history', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  res.json({ ok: true, items: history.read(pin) });
+});
+
+app.post('/api/history/watch', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = history.record(pin, req.body || {});
+  if (!out.ok) return res.status(400).json(out);
+  res.json(out);
+});
+
+app.post('/api/history/remove', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = history.remove(pin, (req.body && req.body.id) || '');
+  if (!out.ok) return res.status(400).json(out);
+  res.json(out);
+});
+
+app.get('/api/subscriptions', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  res.json({ ok: true, items: subscriptions.readDecorated(pin) });
+});
+
+app.post('/api/subscriptions/toggle', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = subscriptions.toggle(pin, req.body || {});
+  if (!out.ok) return res.status(400).json(out);
+  if (out.on && out.channel_id) {
+    try {
+      const meta = await media.channelMeta(out.channel_id, (req.body && (req.body.name || req.body.uploader || req.body.channel)) || '');
+      if (meta) {
+        subscriptions.patch(pin, out.channel_id, {
+          name: meta.name,
+          thumbnail: meta.avatar || meta.thumbnail || '',
+        });
+      }
+    } catch (e) {}
+  }
+  out.items = subscriptions.readDecorated(pin);
+  res.json(out);
+});
+
+app.get('/api/subscriptions/feed', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const channels = subscriptions.readDecorated(pin);
+  if (!channels.length) {
+    return res.json({ ok: true, items: [], channels: [] });
+  }
+  try {
+    const items = await media.subscriptionFeed(channels, req.query.limit);
+    await media.fillItemStats(items);
+    res.json({ ok: true, items: items, channels: subscriptions.readDecorated(pin) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180), channels: channels, items: [] });
+  }
+});
+
+app.post('/api/subscriptions/seen', function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const out = subscriptions.markSeen(pin, (req.body && (req.body.channel_id || req.body.id)) || '');
+  if (!out.ok) return res.status(400).json(out);
+  res.json(out);
+});
+
+app.get('/api/subscriptions/channel', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const id = String(req.query.id || req.query.channel_id || '');
+  const channels = subscriptions.read(pin);
+  const ch = channels.filter(function (x) { return x.channel_id === id; })[0];
+  if (!ch) {
+    console.log('[tesla-video subs] 없음 ' + id);
+    return res.status(404).json({ ok: false, error: '구독하지 않은 채널입니다' });
+  }
+  const quick = String(req.query.quick || '') === '1';
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const phase = quick ? '미리받기' : '상세';
+  console.log('[tesla-video subs] ' + phase + ' 시작 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' offset=' + offset);
+  try {
+    const items = await media.youtubeChannelVideos(ch.channel_id, req.query.limit || 16, ch.name, offset, { stamp: false });
+    if (!quick) await media.fillItemStats(items);
+    console.log('[tesla-video subs] ' + phase + ' 완료 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' items=' + ((items && items.length) || 0));
+    if (!offset && items && items[0]) {
+      subscriptions.patch(pin, ch.channel_id, {
+        last_video_id: items[0].id,
+        last_video_ts: items[0].ts || 0,
+        name: ch.name || items[0].uploader,
+        thumbnail: items[0].avatar || '',
+      });
+    }
+    const updated = subscriptions.readDecorated(pin).filter(function (x) {
+      return x.channel_id === ch.channel_id;
+    })[0] || ch;
+    res.json({ ok: true, quick: quick, channel: updated, items: items || [], more: !!(items && items.length >= 8) });
+  } catch (e) {
+    console.log('[tesla-video subs] ' + phase + ' 실패 ' + (ch.name || ch.channel_id) + ' ' + ch.channel_id + ' ' + String((e && e.message) || e).slice(0, 180));
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180), items: [] });
+  }
+});
+
+app.get('/api/subscriptions/check', async function (req, res) {
+  const pin = sessionPin(req);
+  if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
+  try {
+    const channels = subscriptions.read(pin);
+    const need = channels.filter(function (ch) {
+      return ch && !subscriptions.looksLikeAvatar(ch.thumbnail);
+    }).slice(0, 8);
+    if (need.length) await media.fillChannelAvatars(need);
+    need.forEach(function (ch) {
+      if (!ch) return;
+      subscriptions.patch(pin, ch.channel_id, {
+        name: ch.name,
+        thumbnail: ch.avatar || ch.thumbnail || '',
+      });
+    });
+  } catch (e) {}
+  res.json({ ok: true, items: subscriptions.readDecorated(pin) });
+});
+
+app.get('/api/youtube/home', async function (req, res) {
+  try {
+    const n = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 40);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const pin = sessionPin(req);
+    const wantStats = String(req.query.stats || '') === '1';
+    if (pin) {
+      const custom = await recommend.home(pin, n, offset, { stats: wantStats });
+      if (custom) {
+        if (wantStats && custom.items && custom.items.length) await media.fillItemStats(custom.items);
+        return res.json({
+          ok: true,
+          source: 'custom',
+          quick: !wantStats,
+          items: custom.items || [],
+          more: !!custom.more,
+        });
+      }
+    }
+    if (offset > 0) {
+      const extra = await media.youtubeHome(n, offset);
+      await media.fillItemStats(extra);
+      return res.json({ ok: true, source: 'more', items: extra || [], more: !!(extra && extra.length >= n) });
+    }
+    let items = [];
+    try { items = await youtubeOauth.mostPopular(n); } catch (e) { items = null; }
+    if (!items || !items.length) {
+      try {
+        items = await Promise.race([
+          media.youtubeHome(n),
+          new Promise(function (_, rej) { setTimeout(function () { rej(new Error('home timeout')); }, 12000); }),
+        ]);
+      } catch (e2) { items = []; }
+    }
+    items = items || [];
+    if (!items.length) {
+      items = await media.youtubeHome(n);
+    }
+    await media.fillItemStats(items);
+    res.json({ ok: true, source: 'popular', items: items || [], more: !!(items && items.length >= 8) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/youtube/search', async function (req, res) {
+  try {
+    const q = req.query.q || '';
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const wantChannels = offset === 0 && String(req.query.channels || '1') !== '0';
+    const data = wantChannels
+      ? await media.searchYoutubeWithChannels(q, req.query.limit, offset)
+      : { items: await media.searchYoutube(q, req.query.limit, offset), channels: [] };
+    const pin = sessionPin(req);
+    let preferred = [];
+    if (wantChannels && pin) {
+      preferred = subscriptions.read(pin).filter(function (ch) {
+        return media.channelScore(q, ch.name || '') >= 70;
+      });
+    }
+    const seen = {};
+    const channels = [];
+    function addCh(ch) {
+      if (!ch || !ch.channel_id || seen[ch.channel_id]) return;
+      seen[ch.channel_id] = true;
+      channels.push({
+        type: 'channel',
+        channel_id: ch.channel_id,
+        name: ch.name || ch.uploader || ch.channel_id,
+        thumbnail: ch.thumbnail || ch.avatar || '',
+        avatar: ch.avatar || ch.thumbnail || '',
+        subscribers: parseInt(ch.subscribers, 10) || 0,
+      });
+    }
+    preferred.forEach(addCh);
+    (data.channels || []).forEach(addCh);
+    await media.fillChannelAvatars(channels);
+    const found = data.items || [];
+    await media.fillItemStats(found);
+    res.json({ ok: true, items: found, channels: channels, more: found.length >= Math.min(parseInt(req.query.limit, 10) || 16, 16) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/youtube/avatars', async function (req, res) {
+  try {
+    const ids = String(req.query.ids || '').split(',').map(function (s) {
+      return String(s || '').replace(/[^a-zA-Z0-9_@-]/g, '').slice(0, 64);
+    }).filter(Boolean).slice(0, 12);
+    const chans = ids.map(function (id) {
+      return { channel_id: id, name: '', avatar: '', thumbnail: '' };
+    });
+    await media.fillChannelAvatars(chans);
+    const avatars = {};
+    chans.forEach(function (ch) {
+      if (ch && ch.channel_id && (ch.avatar || ch.thumbnail)) {
+        avatars[ch.channel_id] = { avatar: ch.avatar || ch.thumbnail, name: ch.name || '' };
+      }
+    });
+    res.json({ ok: true, avatars: avatars });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180), avatars: {} });
+  }
+});
+
+app.get('/api/youtube/channel', async function (req, res) {
+  try {
+    const id = String(req.query.id || req.query.channel_id || '');
+    const name = String(req.query.name || '');
+    if (!id && !name) return res.status(400).json({ ok: false, error: '채널 없음', items: [] });
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const limit = req.query.limit || 24;
+    const items = await media.youtubeChannelVideos(id, limit, name, offset);
+    await media.fillItemStats(items);
+    res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(parseInt(limit, 10) || 16, 16)) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180), items: [] });
+  }
+});
+
+app.get('/api/youtube/suggest', async function (req, res) {
+  try {
+    const id = String(req.query.id || '');
+    const pick = String(req.query.pick || '');
+    const payload = pick === 'next'
+      ? { items: await media.nextSuggestedVideo(id), more: false }
+      : await media.youtubeSuggestions(id, req.query.limit, req.query.offset);
+    await media.fillItemStats(payload.items);
+    res.json({ ok: true, items: payload.items || [], more: !!payload.more });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 180), items: [] });
+  }
+});
+
+app.get('/api/youtube/related', async function (req, res) {
+  try {
+    const items = await media.youtubeRelated(req.query.id || '', req.query.title || '', req.query.limit, {
+      channel_id: req.query.channel_id || '',
+      uploader: req.query.uploader || req.query.channel || '',
+      offset: req.query.offset || 0,
+      exclude: req.query.exclude || '',
+      prev: req.query.prev || '',
+      uploaded: req.query.uploaded || 0,
+      pick: req.query.pick || '',
+    });
+    await media.fillItemStats(items);
+    const n = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
+    res.json({ ok: true, items: items, more: !!(items && items.length >= Math.min(n, 8)) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/youtube/comments', async function (req, res) {
+  try {
+    const id = String(req.query.id || '');
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1, 1), 20);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const sort = /^(?:top|new)(?:-asc)?$/.test(req.query.sort || '') ? req.query.sort : 'top';
+    const data = await media.youtubeComments(id, limit, offset, sort);
+    res.json({ ok: true, items: data.items, more: data.more, total: data.total || 0 });
+  } catch (e) {
+    res.status(200).json({ ok: false, items: [], more: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.post('/api/youtube/device/start', async function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
+  try {
+    const data = await youtubeOauth.deviceStart();
+    res.json({
+      ok: true,
+      device_code: data.device_code,
+      user_code: data.user_code,
+      verification_url: data.verification_url || 'https://www.google.com/device',
+      interval: data.interval || 5,
+      expires_in: data.expires_in || 1800,
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message.slice(0, 200) });
+  }
+});
+
+app.post('/api/youtube/device/poll', async function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
+  try {
+    const data = await youtubeOauth.devicePoll(req.body && req.body.device_code);
+    res.json(data);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message.slice(0, 200) });
+  }
+});
+
+app.post('/api/youtube/cookies', function (req, res) {
+  if (!sessionRecord(req)) return res.status(401).json({ ok: false, error: 'PIN required' });
+  const raw = String((req.body && req.body.cookies) || '').trim();
+  if (raw.indexOf('youtube.com') === -1) {
+    return res.status(400).json({ ok: false, error: 'youtube.com 쿠키가 없습니다. Netscape cookies.txt 형식으로 붙여 넣으세요.' });
+  }
+  const dest = path.join(config.DATA_DIR, 'youtube-cookies.txt');
+  fs.mkdirSync(config.DATA_DIR, { recursive: true });
+  fs.writeFileSync(dest, raw.charAt(raw.length - 1) === '\n' ? raw : raw + '\n');
+  res.json({ ok: true });
+});
+
+app.get('/api/youtube/subscriptions', async function (req, res) {
+  const gtoken = await youtubeOauth.refreshAccessToken();
+  if (gtoken) {
+    try {
+      const data = await youtubeOauth.subscriptionVideos(gtoken, req.query.limit);
+      await media.fillItemStats(data.items);
+      return res.json({ ok: true, items: data.items, channels: data.channels, source: 'oauth' });
+    } catch (e) {
+      /* fall through to cookies */
+    }
+  }
+  try {
+    const items = await media.youtubeSubscriptions(req.query.limit);
+    await media.fillItemStats(items);
+    res.json({ ok: true, items: items, source: 'cookies' });
+  } catch (e) {
+    res.status(401).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/media/info', async function (req, res) {
+  try {
+    const input = req.query.url || req.query.id || '';
+    if (!media.allowedSource(input)) {
+      return res.status(400).json({ ok: false, error: 'YouTube/Twitch 주소만 조회할 수 있습니다' });
+    }
+    const info = await media.resolveSource(input, req.query.quality || 480);
+    res.json({
+      ok: true,
+      type: info.type,
+      id: info.id,
+      title: info.title,
+      duration: info.duration,
+      isLive: info.isLive,
+      uploader: info.uploader,
+      channel: info.channel || info.uploader || '',
+      channel_id: info.channel_id || '',
+      avatar: info.avatar || '',
+      thumbnail: info.thumbnail,
+      pageUrl: info.pageUrl,
+      width: info.width || 854,
+      height: info.height || 480,
+      aspect: info.aspect || (16 / 9),
+      views: info.views || 0,
+      uploaded: info.uploaded || 0,
+      comments: info.comments == null ? null : info.comments,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message.slice(0, 180) });
+  }
+});
+
+app.get('/api/audio', function (req, res) {
+  const input = req.query.url || req.query.channel || req.query.id || '';
+  const quality = req.query.quality || 480;
+  const start = stream.parseStart(req.query.start);
+  if (!input) return res.status(400).end();
+  stream.attachAudioStream(req, res, input, quality, start);
+});
+
+app.get('/api/twitch/live', async function (req, res) {
+  const st = await media.twitchStatus(req.query.channel || '');
+  res.json({ channel: st.channel, live: !!st.live, error: st.error });
+});
+
+app.get('/api/twitch/status', async function (req, res) {
+  const st = await media.twitchStatus(req.query.channel || '');
+  res.json(st);
+});
+
+app.get('/api/twitch/follows', async function (req, res) {
+  const rec = sessionRecord(req);
+  if (!rec || !rec.twitchAccess) return res.status(401).json({ ok: false, error: 'Twitch 연결이 없습니다' });
+  try {
+    const data = await twitchOauth.followedChannels(rec.twitchAccess);
+    res.json(data);
+  } catch (e) {
+    res.json({ error: e.message.slice(0, 200) });
+  }
+});
+
+app.use('/api', function (req, res) {
+  res.status(404).json({ ok: false, error: 'not found' });
+});
+
+app.use(express.static(config.PUBLIC_DIR, {
+  index: 'index.html',
+  etag: false,
+  lastModified: false,
+  setHeaders: function (res) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+  }
+}));
+
+app.get('*', function (req, res, next) {
+  if (req.path.indexOf('/api/') === 0 || req.path.indexOf('/ws/') === 0) return next();
+  res.sendFile(path.join(config.PUBLIC_DIR, 'index.html'));
+});
+
+const server = app.listen(config.PORT, config.BIND_HOST, function () {
+  console.log('테슬라 비디오  http://' + config.BIND_HOST + ':' + config.PORT);
+  console.log('PUBLIC_BASE=' + (config.PUBLIC_BASE || '/'));
+  console.log('PIN ' + (config.ACCESS_PIN ? 'enabled' : 'disabled'));
+  if (config.COOKIES_FILE) console.log('cookies: ' + config.COOKIES_FILE);
+  setTimeout(function () {
+    media.youtubeHome(24).then(function (items) {
+      console.log('home cache ready: ' + items.length);
+    }).catch(function (e) {
+      console.log('home cache skip: ' + (e.message || e));
+    });
+  }, 800);
+});
+
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+
+server.on('upgrade', function (req, socket, head) {
+  const parsed = url.parse(req.url, true);
+  if (!/\/ws\/mpeg1\/?$/.test(parsed.pathname || '')) {
+    socket.destroy();
+    return;
+  }
+  if (!isAuthed(req)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, function (ws) {
+    wss.emit('connection', ws, req, parsed);
+  });
+});
+
+wss.on('connection', function (ws, req, parsed) {
+  parsed = parsed || url.parse(req.url, true);
+  const input = parsed.query.url || parsed.query.channel || parsed.query.id || '';
+  const quality = parsed.query.quality || 480;
+  const start = stream.parseStart(parsed.query.start);
+  const fps = parseInt(parsed.query.fps, 10) === 30 ? 30 : 24;
+  const low = parsed.query.vbr === 'low';
+  const videoScale = parseFloat(parsed.query.vscale);
+  const format = parsed.query.format || '';
+  const refresh = parsed.query.refresh === '1';
+  const legacySeek = parsed.query.legacy === '1';
+  const parallel = parsed.query.parallel === '1';
+  if (!input) {
+    ws.send(JSON.stringify({ type: 'error', message: 'url/channel 이 필요합니다' }));
+    ws.close();
+    return;
+  }
+  stream.attachWsStream(ws, input, quality, start, { fps: fps, low: low, videoScale: videoScale, format: format, refresh: refresh, legacySeek: legacySeek, parallel: parallel });
+  keepSessionAlive(req, ws);
+});
+
+function shutdown() {
+  console.log('shutting down');
+  flushSessions();
+  server.close(function () { process.exit(0); });
+  setTimeout(function () { process.exit(0); }, 3000);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

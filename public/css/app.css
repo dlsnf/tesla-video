@@ -867,9 +867,9 @@ html:not(.watch-doc) .stat {
   color: #0f0f0f;
   border-color: #3ea6ff;
 }
-.feed-split { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: auto; }
+.feed-split { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .subs-td { width: 228px; vertical-align: top; padding: 0 16px 0 0; }
-.feed-td { width: 99%; vertical-align: top; }
+.feed-td { vertical-align: top; }
 .watch-feed, .watch-feed .feed-td { min-height: 1000px; }
 .watch-list { min-height: 1000px; }
 .watch-fill { height: 1000px; width: 100%; font-size: 14px; }

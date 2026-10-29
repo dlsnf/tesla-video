@@ -1,0 +1,230 @@
+(function (w) {
+  function base() { return w.APP_BASE || ''; }
+  function getToken() {
+    return '';
+  }
+  function setToken() {}
+  function forgetPinLabel() {
+    try { sessionStorage.removeItem('tv_pin_label'); } catch (e) {}
+  }
+  function stripTokenFromAddress() {
+    try {
+      if (!w.history || !w.history.replaceState) return;
+      var u = new w.URL(w.location.href);
+      if (!u.searchParams.has('token')) return;
+      u.searchParams.delete('token');
+      w.history.replaceState(null, '', u.pathname + u.search + u.hash);
+    } catch (e) {}
+  }
+  function clearLegacyToken() {
+    try { localStorage.removeItem('tv_token'); } catch (e) {}
+    stripTokenFromAddress();
+  }
+  function getDebug() {
+    var q = /(?:^|[?&])debug=([^&]*)/.exec(String(w.location.search || ''));
+    if (!q || q[1] === undefined) return false;
+    var value = decodeURIComponent(q[1] || '');
+    try { localStorage.setItem('tv_debug', value); } catch (e2) {}
+    try { sessionStorage.setItem('tv_debug', value); } catch (e3) {}
+    return value === '1' || value === 'true' || value === 'on';
+  }
+  function setDebug(on) {
+    var v = !!on ? '1' : '';
+    try { if (v) localStorage.setItem('tv_debug', v); else localStorage.removeItem('tv_debug'); } catch (e) {}
+    try { if (v) sessionStorage.setItem('tv_debug', v); else sessionStorage.removeItem('tv_debug'); } catch (e2) {}
+    try {
+      if (w.history && w.history.replaceState && !!on && String(w.location.search || '').indexOf('debug=') < 0) {
+        var href = String(w.location.href || '');
+        w.history.replaceState(null, '', href + (href.indexOf('?') >= 0 ? '&' : '?') + 'debug=1');
+      }
+    } catch (e3) {}
+  }
+  function withDebug(u) {
+    if (!getDebug()) return u;
+    return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
+  }
+  function url(p) { return withDebug(base() + p); }
+  function ws(p) {
+    var proto = w.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return withDebug(proto + '//' + w.location.host + base() + p);
+  }
+
+  function xhr(method, path, body, cb) {
+    var x = new XMLHttpRequest();
+    x.open(method, url(path), true);
+    x.withCredentials = true;
+    x.timeout = 60000;
+    x.setRequestHeader('Accept', 'application/json');
+    if (body) x.setRequestHeader('Content-Type', 'application/json');
+    x.onload = function () {
+      var data = null;
+      try { data = JSON.parse(x.responseText); } catch (e) { data = { raw: x.responseText }; }
+      cb(x.status, data);
+    };
+    x.onerror = function () { cb(0, { error: 'network' }); };
+    x.ontimeout = function () { cb(0, { error: 'timeout' }); };
+    x.send(body ? JSON.stringify(body) : null);
+    return x;
+  }
+
+  function get(path, cb) { return xhr('GET', path, null, cb); }
+  function post(path, body, cb) { return xhr('POST', path, body, cb); }
+
+  function pad2(n) {
+    n = String(n);
+    return n.length < 2 ? '0' + n : n;
+  }
+  function fmtViews(n) {
+    n = parseInt(n, 10) || 0;
+    if (n <= 0) return '';
+    if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + '억회';
+    if (n >= 10000) return Math.round(n / 10000) + '만회';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + '천회';
+    return n + '회';
+  }
+  function fmtAgo(ms) {
+    ms = parseInt(ms, 10) || 0;
+    if (ms <= 0) return '';
+    if (ms > 0 && ms < 1e12) ms *= 1000;
+    var diff = Date.now() - ms;
+    if (diff < 0) diff = 0;
+    var min = Math.floor(diff / 60000);
+    var hour = Math.floor(diff / 3600000);
+    var day = Math.floor(diff / 86400000);
+    if (hour < 1) {
+      if (min < 1) return '방금';
+      return min + '분 전';
+    }
+    if (hour < 24) return hour + '시간 전';
+    if (day < 7) return day + '일 전';
+    if (day < 30) return Math.max(1, Math.floor(day / 7)) + '주일 전';
+    if (day < 365) return Math.max(1, Math.floor(day / 30)) + '개월 전';
+    return Math.max(1, Math.floor(day / 365)) + '년 전';
+  }
+  function fmtDur(sec) {
+    sec = parseInt(sec, 10) || 0;
+    if (sec <= 0) return '';
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = sec % 60;
+    if (h) return h + ':' + pad2(m) + ':' + pad2(s);
+    return m + ':' + pad2(s);
+  }
+
+  function stampLinks() {
+    var debug = getDebug();
+    if (!debug) return;
+    var as = document.getElementsByTagName('a');
+    var i;
+    for (i = 0; i < as.length; i++) {
+      var href = as[i].getAttribute('href');
+      if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) continue;
+      if (href.indexOf('mailto:') === 0) continue;
+      var next = href;
+      if (next.indexOf('debug=') < 0) {
+        next += (next.indexOf('?') >= 0 ? '&' : '?') + 'debug=1';
+      }
+      if (next !== href) as[i].href = next;
+      if (/^https?:/i.test(href) && href.indexOf(w.location.host) < 0) continue;
+    }
+  }
+
+  function home() { w.location.href = url('/') || '/'; }
+
+  function setRootClass(name, on) {
+    var root = document.documentElement;
+    if (!root) return;
+    var parts = String(root.className || '').split(/\s+/);
+    var next = [];
+    var i;
+    for (i = 0; i < parts.length; i++) {
+      if (parts[i] && parts[i] !== name) next.push(parts[i]);
+    }
+    if (on) next.push(name);
+    root.className = next.join(' ');
+  }
+
+  function markNeedPin(on) { setRootClass('need-pin', !!on); }
+
+  function markAuthWait(on) { setRootClass('auth-wait', !!on); }
+
+  function revealApp() {
+    markAuthWait(false);
+    markNeedPin(false);
+  }
+
+  function showPin(done) {
+    var mask = document.getElementById('pinMask');
+    if (!mask) { revealApp(); if (done) done(); return; }
+    markAuthWait(true);
+    markNeedPin(true);
+    mask.className = 'pin-mask on';
+    var pin = '';
+    var dots = document.getElementById('pinDots');
+    var err = document.getElementById('pinErr');
+    if (err) err.textContent = '';
+    function render() {
+      if (dots) dots.textContent = pin.length ? new Array(pin.length + 1).join('•') : 'PIN';
+    }
+    render();
+    mask.onclick = function (e) {
+      var b = e.target.getAttribute('data-k');
+      if (b === undefined || b === null) return;
+      if (b === 'c') { pin = ''; render(); return; }
+      if (b === 'x') { pin = pin.slice(0, -1); render(); return; }
+      if (pin.length >= 8) return;
+      pin += b;
+      render();
+      if (pin.length >= 4) {
+        post('/api/auth/login', { pin: pin }, function (st, d) {
+          if (d && d.ok) {
+            forgetPinLabel();
+            clearLegacyToken();
+            stampLinks();
+            mask.className = 'pin-mask';
+            revealApp();
+            if (done) done();
+          } else {
+            pin = '';
+            render();
+            if (err) err.textContent = (d && d.error) || 'PIN 오류';
+          }
+        });
+      }
+    };
+  }
+
+  function ensurePin(done) {
+    get('/api/auth/status', function (status, data) {
+      if (data && data.authed) {
+        clearLegacyToken();
+        stampLinks();
+        revealApp();
+        if (done) done();
+        return;
+      }
+      showPin(done);
+    });
+  }
+
+  function logout(done) {
+    post('/api/auth/logout', {}, function () {
+      try { localStorage.removeItem('tv_token'); } catch (e) {}
+      forgetPinLabel();
+      stripTokenFromAddress();
+      try { document.cookie = 'tv_token=; path=/; max-age=0'; } catch (e2) {}
+      try { document.cookie = 'tv_token=; path=/tv; max-age=0'; } catch (e3) {}
+      showPin(done);
+    });
+  }
+
+  if (String(w.location.search || '').indexOf('debug=') >= 0) {
+    var debugParam = /(?:^|[?&])debug=([^&]*)/.exec(String(w.location.search || ''));
+    if (debugParam) {
+      try { localStorage.setItem('tv_debug', decodeURIComponent(debugParam[1] || '')); } catch (e) {}
+      try { sessionStorage.setItem('tv_debug', decodeURIComponent(debugParam[1] || '')); } catch (e2) {}
+    }
+  }
+
+  w.tv = { url: url, ws: ws, get: get, post: post, fmtDur: fmtDur, fmtViews: fmtViews, fmtAgo: fmtAgo, home: home, ensurePin: ensurePin, logout: logout, stampLinks: stampLinks, getToken: getToken, setToken: setToken, getDebug: getDebug, setDebug: setDebug, withDebug: withDebug };
+})(window);

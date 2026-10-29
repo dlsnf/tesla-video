@@ -2870,10 +2870,16 @@
     showSubsRail(false);
     resetPager('favs');
     saveBrowseState();
-    setStatus('즐겨찾기');
+    setStatus('즐겨찾기를 불러오는 중...');
+    renderListSpinner();
     tv.get('/api/favorites', function (code, data) {
       if (!stillReq(seq) || currentFeed !== 'favs') return;
-      if (!data || !data.ok) { setStatus((data && data.error) || '즐겨찾기를 불러오지 못했습니다'); return; }
+      if (!data || !data.ok) {
+        setStatus((data && data.error) || '즐겨찾기를 불러오지 못했습니다');
+        libRaw = [];
+        applyLibView('즐겨찾기를 불러오지 못했습니다.');
+        return;
+      }
       var favItems = data.items || [];
       favIds = {};
       for (var i = 0; i < favItems.length; i++) favIds[favItems[i].id] = favItems[i];
@@ -2895,12 +2901,16 @@
     pager.more = false;
     paintMoreBar();
     saveBrowseState();
-    setStatus('최근 재생');
-    if (stage) renderListSpinner();
-    else renderSkeleton();
+    setStatus('최근 재생을 불러오는 중...');
+    renderListSpinner();
     tv.get('/api/history', function (code, data) {
       if (!stillReq(seq) || currentFeed !== 'history') return;
-      if (code === 401) { setStatus('PIN이 필요합니다. 새로고침 후 다시 입력하세요.'); return; }
+      if (code === 401) {
+        setStatus('PIN이 필요합니다. 새로고침 후 다시 입력하세요.');
+        libRaw = [];
+        applyLibView('PIN이 필요합니다. 새로고침 후 다시 입력하세요.');
+        return;
+      }
       if (!data || !data.ok) {
         setStatus((data && data.error) || '최근 재생을 불러오지 못했습니다');
         libRaw = [];
