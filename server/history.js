@@ -30,20 +30,45 @@ function write(pin, items) {
   fs.writeFileSync(fileFor(pin), JSON.stringify(items.slice(0, MAX), null, 2));
 }
 
+function cleanPosition(v) {
+  const n = parseFloat(v);
+  if (!isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), 12 * 3600);
+}
+
 function record(pin, body) {
   if (!favorites.validPin(pin)) return { ok: false, error: 'PIN 없음' };
   const id = String((body && body.id) || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
   const channel_id = String((body && (body.channel_id || body.channelId)) || '').replace(/[^a-zA-Z0-9_@-]/g, '').slice(0, 64);
   if (!id && !channel_id) return { ok: false, error: '기록 없음' };
-  const list = read(pin);
+  let prev = null;
+  const list = [];
+  read(pin).forEach(function (it) {
+    if (id && it && it.id === id) {
+      if (!prev) prev = it;
+      return;
+    }
+    list.push(it);
+  });
+  const sentPosition = !!(body && body.position != null && body.position !== '');
+  const position = sentPosition ? cleanPosition(body.position) : cleanPosition(prev && prev.position);
+  const partial = !String((body && body.title) || '') && !String((body && body.url) || '') && !String((body && body.thumbnail) || '');
+  if (partial && prev) {
+    prev.position = position;
+    prev.ts = Date.now();
+    list.unshift(prev);
+    write(pin, list);
+    return { ok: true };
+  }
   list.unshift({
     id: id,
-    channel_id: channel_id,
-    title: String((body && body.title) || '').slice(0, 200),
-    url: String((body && body.url) || '').slice(0, 400),
-    thumbnail: String((body && body.thumbnail) || '').slice(0, 400),
-    duration: parseInt((body && body.duration), 10) || 0,
-    uploader: String((body && body.uploader) || '').slice(0, 120),
+    channel_id: channel_id || (prev && prev.channel_id) || '',
+    title: String((body && body.title) || (prev && prev.title) || '').slice(0, 200),
+    url: String((body && body.url) || (prev && prev.url) || '').slice(0, 400),
+    thumbnail: String((body && body.thumbnail) || (prev && prev.thumbnail) || '').slice(0, 400),
+    duration: parseInt((body && body.duration), 10) || (prev && parseInt(prev.duration, 10)) || 0,
+    uploader: String((body && body.uploader) || (prev && prev.uploader) || '').slice(0, 120),
+    position: position,
     ts: Date.now(),
   });
   write(pin, list);

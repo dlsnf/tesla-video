@@ -479,6 +479,7 @@ function attachWsStream(ws, input, quality, start, extra) {
 
   sendStatus(ws, '영상 주소를 확인하는 중...');
 
+  // Handlers are already attached. Waiting here only delayed yt-dlp.
   function beginEncode() {
   if (closed || ws.readyState !== 1) return;
   media.resolveSource(input, quality).then(function (info) {
@@ -738,7 +739,7 @@ function attachWsStream(ws, input, quality, start, extra) {
     cleanup();
   });
   }
-  setTimeout(beginEncode, 350);
+  beginEncode();
 }
 
 function attachAudioStream(req, res, input, quality, start) {

@@ -478,18 +478,29 @@ app.get('/api/youtube/status', function (req, res) {
   });
 });
 
+function sendPrefs(res, saved) {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    autoplayNext: saved.autoplayNext,
+    autoQuality: saved.autoQuality,
+    volume: saved.volume,
+    searchHistory: saved.searchHistory !== false,
+    recentSearches: saved.recentSearches || [],
+    searchRev: saved.searchRev || 0
+  });
+}
+
 app.get('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  const saved = prefs.read(pin);
-  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
+  sendPrefs(res, prefs.read(pin));
 });
 
 app.post('/api/prefs', function (req, res) {
   const pin = sessionPin(req);
   if (!pin) return res.status(401).json({ ok: false, error: 'PIN required' });
-  const saved = prefs.write(pin, req.body || {});
-  res.json({ ok: true, autoplayNext: saved.autoplayNext, autoQuality: saved.autoQuality, volume: saved.volume });
+  sendPrefs(res, prefs.write(pin, req.body || {}));
 });
 
 app.get('/api/favorites', async function (req, res) {

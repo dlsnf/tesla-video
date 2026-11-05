@@ -378,6 +378,14 @@ async function resolveSource(input, quality) {
   if (cached && cached.sourceHeight != null && Object.prototype.hasOwnProperty.call(cached, 'comments')) return cached;
   if (cached) resolveCache.delete(key);
 
+  // /api/media/info and the playback socket ask for the same URLs together.
+  // Share one yt-dlp run instead of starting a second one.
+  return once('resolve|' + key, function () {
+    return resolveSourceFresh(classified, q, key);
+  });
+}
+
+async function resolveSourceFresh(classified, q, key) {
   const format = formatForQuality(q);
   const printFmt = '%(id)s|||%(title)s|||%(duration)s|||%(is_live)s|||%(uploader)s|||%(thumbnail)s|||%(width)s|||%(height)s|||%(channel_id)s|||%(channel)s|||%(uploader_avatar_url)s|||%(timestamp)s|||%(view_count)s|||%(upload_date)s|||%(comment_count)s';
   let dumpJson = null;
