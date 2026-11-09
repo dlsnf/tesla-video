@@ -158,6 +158,8 @@
   var startupLoadLeft = 0;
   var startupLoadTick = 0;
   var startupLoadActive = false;
+  var attemptedPlaySrc = '';
+  var attemptedPlayAt = 0;
   var endCoastFrom = 0;
   var endCoastPos = 0;
   // 다음 영상 자동 재생, 반복 재생. 이 횟수만큼 끝나면 확인을 묻는다.
@@ -739,7 +741,7 @@
     var repeatMatch = String(t || '').match(/^(\d+)초 (?:후|뒤에) (?:다시 재생합니다|다음 영상을 재생합니다)$/);
     if (stageStatus) {
       var membersMsg = String(t || '') === '회원전용 영상입니다';
-      var showStageStatus = membersMsg || /재생할 수 없|플레이어 오류/.test(String(t || ''));
+      var showStageStatus = membersMsg || /재생할 수 없|플레이어 오류|시작하지 못했습니다|받지 못했습니다|이동하지 못했습니다/.test(String(t || ''));
       var canRetry = showStageStatus && !membersMsg;
       var stageText = $('stageStatusText');
       if (stageText) stageText.textContent = showStageStatus ? t : '';
@@ -5992,6 +5994,8 @@
 
   function playUrl(src, seek, opts) {
     opts = opts || {};
+    attemptedPlaySrc = src || '';
+    attemptedPlayAt = seek || 0;
     var keepList = !!opts.keepList;
     var sameSrc = playing === src;
     var skipInfo = !!opts.skipInfo && duration > 0 && durationSource === src && sameWatch(src);
@@ -6928,7 +6932,7 @@
     startupLoadTimer = null;
     startupLoadTick = 0;
     if (token !== startupLoadToken || !startupLoadActive) return;
-    if (!playing || ended || videoStartWall) {
+    if (!playing || ended || videoStartWall || stageFrameReady || netBytes > 0 || (prerolling && player)) {
       clearStartupLoadWatch();
       return;
     }
@@ -6941,7 +6945,9 @@
 
   function failStartupLoad() {
     clearStartupLoadWatch();
-    if (!playing || ended || videoStartWall) return;
+    if (!playing || ended || videoStartWall || stageFrameReady || netBytes > 0 || (prerolling && player)) return;
+    attemptedPlaySrc = playing;
+    attemptedPlayAt = startAt || 0;
     beginPlay();
     watchDetailLoading = false;
     pipePending = false;
@@ -9824,15 +9830,26 @@
     goYtHome();
   };
   function retryStageLoad() {
-    var id = (watchItem && watchItem.id) || qsVal('v') || '';
-    var url = (watchItem && watchItem.url) || qsVal('url') || '';
-    var src = playing || (id ? ('https://www.youtube.com/watch?v=' + id) : url);
+    var urlId = qsVal('v') || '';
+    var urlOnly = qsVal('url') || '';
+    var src = '';
+    if (urlId) src = 'https://www.youtube.com/watch?v=' + urlId;
+    else if (urlOnly) src = urlOnly;
+    else if (attemptedPlaySrc) src = attemptedPlaySrc;
+    else if (playing) src = playing;
+    else if (watchItem && watchItem.id) src = 'https://www.youtube.com/watch?v=' + watchItem.id;
+    else if (watchItem && watchItem.url) src = watchItem.url;
     if (!src) {
       reloadWatch();
       return;
     }
-    var at = startAt > 0 ? startAt : 0;
-    var title = (watchItem && watchItem.title) || '';
+    var selectedId = videoIdFromSrc(src);
+    var at = 0;
+    if (attemptedPlaySrc && videoIdFromSrc(attemptedPlaySrc) === selectedId && attemptedPlayAt > 0) at = attemptedPlayAt;
+    else if (startAt > 0 && (!playing || videoIdFromSrc(playing) === selectedId)) at = startAt;
+    var preview = readWatchPreview(selectedId);
+    var title = (preview && preview.title) || '';
+    if (!title && watchItem && watchItem.id === selectedId) title = watchItem.title || '';
     if ($('npTitle') && ($('npTitle').textContent === '영상을 재생할 수 없습니다' || $('npTitle').textContent === '재생할 수 없음')) {
       $('npTitle').textContent = title || '불러오는 중...';
     }
@@ -9844,8 +9861,8 @@
   }
 
   function reloadWatch() {
-    var id = (watchItem && watchItem.id) || qsVal('v') || (readWatch() && readWatch().v) || '';
-    var url = playing || (watchItem && watchItem.url) || '';
+    var id = qsVal('v') || (watchItem && watchItem.id) || (readWatch() && readWatch().v) || '';
+    var url = qsVal('url') || playing || (watchItem && watchItem.url) || '';
     rememberWatch(id, url);
     try { sessionStorage.removeItem('tv_watch_at'); } catch (eAt) {}
     unlockPlaybackAudio();
